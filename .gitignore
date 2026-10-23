@@ -1,0 +1,6 @@
+.env
+.env.*
+!.env.example
+/focusflow-api
+*.log
+.DS_Store

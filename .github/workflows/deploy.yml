@@ -1,0 +1,97 @@
+name: Test, build & deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: focusflow-api-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/foucflow/focusflow-api
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+
+  build:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The image holds no secrets: .env is mounted on the VPS at runtime
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: VERSION=${{ github.sha }}
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy compose file
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          source: deploy/docker-compose.yml
+          target: /tmp/focusflow-deploy
+          rm: true
+      - name: Deploy on the VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/focusflow
+            [ -f .env ] || { echo "/opt/focusflow/.env is missing"; exit 1; }
+            cp /tmp/focusflow-deploy/deploy/docker-compose.yml docker-compose.yml
+            rm -rf /tmp/focusflow-deploy
+            export API_TAG=${{ github.sha }}
+            # The package is private: log in with this job's short-lived token, pull, log out
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            docker compose pull api
+            docker logout ghcr.io
+            API_TAG=$API_TAG docker compose up -d
+            for i in $(seq 1 30); do
+              curl -fsS http://127.0.0.1:8091/health && echo && break
+              [ "$i" = 30 ] && { echo "health check failed"; docker logs --tail 60 focusflow_api; exit 1; }
+              sleep 2
+            done
+            # Keep the last 3 API images
+            docker images ghcr.io/foucflow/focusflow-api --format '{{.ID}}' | tail -n +4 | xargs -r docker rmi 2>/dev/null || true
+            echo "deployed ${{ github.sha }}"

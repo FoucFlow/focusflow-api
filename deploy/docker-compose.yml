@@ -1,0 +1,61 @@
+# ═════════ installed at /opt/focusflow/docker-compose.yml on the VPS ═══════
+# FocusFlow API + its own Postgres. Caddy (host) serves
+# https://api.focusflow.sswoco.org → 127.0.0.1:8091.
+#
+#   .env           /opt/focusflow/.env (root-only, never in git or the image)
+#   database       focusflow_db, private network only (access: SSH + docker exec)
+#   media          bucket focusflow-media on the shared RustFS (sswoco_storage)
+#   traces         Alloy on the dart_observability network
+#   backups        /usr/local/sbin/focusflow-backup.sh (cron) + offsite-backup@focusflow
+# ═════════════════════════════════════════════════════════════════════════
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: focusflow_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: focusflow
+      POSTGRES_USER: focusflow
+      POSTGRES_PASSWORD: ${FOCUSFLOW_DB_PASSWORD:?set in .env}
+    # Small VPS: modest memory settings
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=40", "-c", "work_mem=4MB"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [internal]
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U focusflow -d focusflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    image: ghcr.io/foucflow/focusflow-api:${API_TAG:-latest}
+    container_name: focusflow_api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://focusflow:${FOCUSFLOW_DB_PASSWORD}@db:5432/focusflow?sslmode=disable
+      S3_ENDPOINT: http://sswoco_storage:9000
+      OTEL_EXPORTER_OTLP_ENDPOINT: alloy:4317
+    ports:
+      - "127.0.0.1:8091:8091"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal, storage, observability]
+    mem_limit: 160m
+    labels:
+      platform: focusflow
+
+volumes:
+  pgdata:
+
+networks:
+  internal: {}
+  storage:
+    external: true
+    name: sswoco-storage_default
+  observability:
+    external: true
+    name: dart_observability
