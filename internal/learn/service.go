@@ -107,8 +107,14 @@ const budgetMessage = "FocusFlow has reached its AI budget for this month, so ne
 
 const creditMessage = "FocusFlow's AI account has run out of credit, so this can't be done right now. The site admin needs to top it up; then press Retry."
 
+// VideoAI is the video reader (nil if none).
+func (s *Service) VideoAI() VideoAI { return s.videoAI }
+
 // SetVideoAI turns on video reading (Gemini).
 func (s *Service) SetVideoAI(v VideoAI) { s.videoAI = v }
+
+// Recorder returns the function that logs every AI request (ai_calls).
+func (s *Service) Recorder() CallRecorder { return recorder(s.db) }
 
 // SetVideoDuration lets long videos be watched in parts.
 func (s *Service) SetVideoDuration(d VideoDuration) { s.videoLength = d }

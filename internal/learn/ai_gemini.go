@@ -54,7 +54,11 @@ var geminiPrices = map[string][2]float64{
 type geminiVideoAI struct {
 	client *genai.Client
 	model  string
+	record CallRecorder
 }
+
+// SetRecorder logs every request (for quota tracking).
+func (g *geminiVideoAI) SetRecorder(r CallRecorder) { g.record = r }
 
 // NewGeminiVideoAI returns nil without a key (videos then use title and note only).
 func NewGeminiVideoAI(ctx context.Context, apiKey, model string) (VideoAI, error) {
@@ -141,6 +145,13 @@ func (g *geminiVideoAI) watch(ctx context.Context, youtubeID, title, note string
 	for attempt := 0; attempt < 4; attempt++ {
 		resp, err = g.client.Models.GenerateContent(ctx, g.model,
 			[]*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
+		if g.record != nil {
+			var in, out int64
+			if err == nil && resp.UsageMetadata != nil {
+				in, out = int64(resp.UsageMetadata.PromptTokenCount), int64(resp.UsageMetadata.CandidatesTokenCount+resp.UsageMetadata.ThoughtsTokenCount)
+			}
+			g.record("gemini", g.model, in, out, err)
+		}
 		if err == nil || !retryableGemini(err) || ctx.Err() != nil {
 			break
 		}

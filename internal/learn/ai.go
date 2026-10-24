@@ -34,6 +34,15 @@ func (f FallbackAI) SetExamModels(question, mark string) {
 	}
 }
 
+// SetRecorder logs the calls of both providers.
+func (f FallbackAI) SetRecorder(r CallRecorder) {
+	for _, p := range []any{f.Primary, f.Backup} {
+		if s, ok := p.(interface{ SetRecorder(CallRecorder) }); ok {
+			s.SetRecorder(r)
+		}
+	}
+}
+
 func (f FallbackAI) Digest(ctx context.Context, in DigestInput) (Digest, Usage, error) {
 	d, u, err := f.Primary.Digest(ctx, in)
 	if errors.Is(err, ErrAICredit) {

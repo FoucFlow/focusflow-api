@@ -258,6 +258,12 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 	} else {
 		slog.Warn("GEMINI_API_KEY not set: videos are linked by title only (no concepts or timestamps)")
 	}
+	// Every AI request is logged for quota tracking (admin AI usage page)
+	for _, p := range []any{ai, svc.VideoAI()} {
+		if r, ok := p.(interface{ SetRecorder(learn.CallRecorder) }); ok {
+			r.SetRecorder(svc.Recorder())
+		}
+	}
 	controllers.CanCreateCourse = svc.CanCreateCourse
 	// Sites allowed to upload files straight to the API: the frontend URL,
 	// its www/non-www twin, and any extra in UPLOAD_ORIGINS (comma-separated)

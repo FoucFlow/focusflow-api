@@ -639,3 +639,9 @@ func (h *Handler) ReviewAttempt(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"data": a, "message": "Review saved. The learner can see the result."})
 }
+
+// GET /api/admin/ai/quota: today's AI requests and tokens per model, the
+// last quota error and the limits Google reported in it.
+func (h *Handler) AIQuota(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"data": h.s.AIQuota()})
+}

@@ -37,6 +37,16 @@ type claudeAI struct {
 	enrichModel   string // web search for references
 	questionModel string // writing test questions
 	markModel     string // marking written answers (cheap)
+	record        CallRecorder
+}
+
+// SetRecorder logs every request (for quota tracking).
+func (a *claudeAI) SetRecorder(r CallRecorder) { a.record = r }
+
+func (a *claudeAI) recordCall(model string, in, out int64, err error) {
+	if a.record != nil {
+		a.record("claude", model, in, out, err)
+	}
 }
 
 // NewClaudeAI returns the Claude provider, or a disabled one without a key.
@@ -410,6 +420,9 @@ func excerptIndex(in OrganiseInput) map[string]string {
 }
 
 func (u *Usage) add(o Usage) {
+	if o.Model != "" {
+		u.Model = o.Model // the model that actually answered (e.g. after a fallback)
+	}
 	u.InputTokens += o.InputTokens
 	u.OutputTokens += o.OutputTokens
 	u.CostMicroUSD += o.CostMicroUSD
@@ -484,8 +497,10 @@ func (a *claudeAI) call(ctx context.Context, model, system string, blocks []anth
 	}
 	u := Usage{Provider: "claude", Model: model}
 	if err != nil {
+		a.recordCall(model, 0, 0, err)
 		return u, claudeErr(err)
 	}
+	a.recordCall(model, resp.Usage.InputTokens+resp.Usage.CacheReadInputTokens+resp.Usage.CacheCreationInputTokens, resp.Usage.OutputTokens, nil)
 	u.Model = string(resp.Model)
 	u.InputTokens = resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens
 	u.OutputTokens = resp.Usage.OutputTokens
@@ -564,8 +579,10 @@ func (a *claudeAI) FindReferences(ctx context.Context, in EnrichInput) (map[int]
 		params.Messages = messages
 		resp, err := a.client.Beta.Messages.New(ctx, params)
 		if err != nil {
+			a.recordCall(model, 0, 0, err)
 			return nil, u, claudeErr(err)
 		}
+		a.recordCall(model, resp.Usage.InputTokens+resp.Usage.CacheReadInputTokens+resp.Usage.CacheCreationInputTokens, resp.Usage.OutputTokens, nil)
 		u.InputTokens += resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens
 		u.OutputTokens += resp.Usage.OutputTokens
 		searches += resp.Usage.ServerToolUse.WebSearchRequests

@@ -159,5 +159,5 @@ func (AIUsage) TableName() string { return "ai_usage" }
 // Models lists the tables this package owns, for AutoMigrate.
 func Models() []any {
 	return []any{&Material{}, &Unit{}, &Concept{}, &UnitMaterial{}, &UnitProgress{}, &AIUsage{},
-		&Question{}, &TestSettings{}, &Attempt{}, &MarkChange{}}
+		&Question{}, &TestSettings{}, &Attempt{}, &MarkChange{}, &AICall{}}
 }

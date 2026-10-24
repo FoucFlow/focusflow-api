@@ -27,6 +27,7 @@ type geminiAI struct {
 	enrichModel   string // references with Google Search
 	questionModel string // writing test questions
 	markModel     string // marking written answers
+	record        CallRecorder
 	http          *http.Client
 }
 
@@ -68,6 +69,22 @@ func NewGeminiAI(ctx context.Context, apiKey, digestModel, organiseModel, enrich
 	}, nil
 }
 
+// SetRecorder logs every request (for quota tracking).
+func (g *geminiAI) SetRecorder(r CallRecorder) { g.record = r }
+
+// call sends one request and records it.
+func (g *geminiAI) call(ctx context.Context, model string, parts []*genai.Part, cfg *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+	resp, err := g.client.Models.GenerateContent(ctx, model, []*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
+	if g.record != nil {
+		var in, out int64
+		if err == nil && resp.UsageMetadata != nil {
+			in, out = int64(resp.UsageMetadata.PromptTokenCount), int64(resp.UsageMetadata.CandidatesTokenCount+resp.UsageMetadata.ThoughtsTokenCount)
+		}
+		g.record("gemini", model, in, out, err)
+	}
+	return resp, err
+}
+
 // SetExamModels overrides the question-writing and marking models.
 func (g *geminiAI) SetExamModels(question, mark string) {
 	if question != "" {
@@ -91,14 +108,14 @@ func (g *geminiAI) generate(ctx context.Context, model, system string, parts []*
 	var resp *genai.GenerateContentResponse
 	var err error
 	for attempt := 0; attempt < 4; attempt++ {
-		resp, err = g.client.Models.GenerateContent(ctx, model, []*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
+		resp, err = g.call(ctx, model, parts, cfg)
 		if err != nil && noQuota(err) && model != g.digestModel {
 			// The key's plan has no quota at all for this model (the free tier
 			// allows no Pro models): use the reading model (Flash) instead
 			slog.Warn("gemini model not available on this plan, using fallback", "model", model, "fallback", g.digestModel)
 			model = g.digestModel
 			u.Model = model
-			resp, err = g.client.Models.GenerateContent(ctx, model, []*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
+			resp, err = g.call(ctx, model, parts, cfg)
 		}
 		if err == nil || !retryableGemini(err) || ctx.Err() != nil {
 			break

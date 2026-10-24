@@ -16,6 +16,9 @@ func (h *Handler) Routes(r *gin.Engine) {
 
 	g := r.Group("/api/learn", auth.AuthMiddleware())
 
+	// Admin: AI usage against provider quotas
+	r.GET("/api/admin/ai/quota", auth.AuthMiddleware(), auth.RequireRole(auth.RoleAdmin), h.AIQuota)
+
 	g.GET("/me", h.Me)
 	g.GET("/browse", h.Browse)
 	g.GET("/categories", h.Categories)

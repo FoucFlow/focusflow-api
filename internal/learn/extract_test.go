@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func makePptx(t *testing.T, slides map[string]string) []byte {
@@ -110,5 +111,30 @@ func TestNoQuotaIsNotRetried(t *testing.T) {
 	}
 	if noQuota(busy) || !retryableGemini(busy) {
 		t.Fatal("a busy model is retried")
+	}
+}
+
+func TestParseGoogleLimits(t *testing.T) {
+	msg := "gemini: Error 429, Message: You exceeded your current quota, please check your plan and billing details.\n" +
+		"* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_input_token_count, limit: 0, model: gemini-3.1-pro, description: Generate content input tokens per day limit exceeded on Free Tier. See https://x\n" +
+		"* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 250, model: gemini-2.5-flash, description: Generate content requests per day limit exceeded on Free Tier. See https://x\n" +
+		"* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 10, model: gemini-2.5-flash, description: Generate content requests per minute limit exceeded on Free Tier. See https://x"
+	got := parseGoogleLimits(msg)
+	want := []GoogleLimit{{"input tokens per day (free tier)", 0}, {"requests per day (free tier)", 250}, {"requests per minute (free tier)", 10}}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	}
+}
+
+func TestQuotaDayStartsAtPacificMidnight(t *testing.T) {
+	now := time.Date(2026, 10, 25, 6, 30, 0, 0, time.UTC) // 23:30 on the 24th in California (PDT)
+	start, next := quotaDayStart(now)
+	if start.UTC() != time.Date(2026, 10, 24, 7, 0, 0, 0, time.UTC) || next.Sub(start) != 24*time.Hour {
+		t.Fatalf("start %v next %v", start.UTC(), next.UTC())
 	}
 }
