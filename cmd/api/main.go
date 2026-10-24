@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -228,10 +229,21 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		MaxFileBytes:          int64(cfg.MaxMaterialFileMB) << 20,
 		OrganiseRunsPerCourse: cfg.FreeOrganiseRuns,
 	}
-	svc := learn.NewService(gdb, ai, limits, 2)
+	svc := learn.NewService(gdb, ai, limits, cfg.AppKey, 2)
 	controllers.CanCreateCourse = svc.CanCreateCourse
-	learn.NewHandler(svc).Routes(r)
+	// Sites allowed to upload files straight to the API: the frontend URL,
+	// its www/non-www twin, and any extra in UPLOAD_ORIGINS (comma-separated)
+	origins := append(strings.Split(os.Getenv("UPLOAD_ORIGINS"), ","), cfg.FrontendURL, wwwTwin(cfg.FrontendURL))
+	learn.NewHandler(svc, cfg.PublicURL, origins).Routes(r)
 	svc.ResumePending()
+}
+
+// wwwTwin turns https://www.x.com into https://x.com and back.
+func wwwTwin(u string) string {
+	if strings.Contains(u, "://www.") {
+		return strings.Replace(u, "://www.", "://", 1)
+	}
+	return strings.Replace(u, "://", "://www.", 1)
 }
 
 func health(gdb *gorm.DB) gin.HandlerFunc {

@@ -45,6 +45,20 @@ t "upload .pptx" 201 "${A[@]}" -F "file=@$D/slides.pptx" $B/api/learn/courses/$C
 t "add YouTube video" 201 "${A[@]}" "${J[@]}" -d '{"kind":"video","url":"https://youtu.be/dQw4w9WgXcQ","title":"Intro video"}' $B/api/learn/courses/$CID/materials
 check "  video id parsed, ready at once" "d['data']['youtube_id']=='dQw4w9WgXcQ' and d['data']['status']=='ready'"
 t "add web link" 201 "${A[@]}" "${J[@]}" -d '{"kind":"link","url":"https://go.dev/tour","title":"Go tour","note":"Official interactive tour"}' $B/api/learn/courses/$CID/materials
+t "categories" 200 "${A[@]}" $B/api/learn/categories
+check "  8 seeded categories" "len(d['data'])==8"
+t "get a direct-upload token" 200 "${A[@]}" -X POST $B/api/learn/courses/$CID/upload-url
+UPURL=$(py "d['data']['url']"); UPTOK=$(py "d['data']['token']")
+t "bob cannot get an upload token" 403 "${Bo[@]}" -X POST $B/api/learn/courses/$CID/upload-url
+t "browser pre-check from the frontend site" 204 -X OPTIONS -H "Origin: ${ORIGIN:-http://localhost:3000}" -H "Access-Control-Request-Method: POST" -D "$D/h" "$UPURL"
+grep -qi "access-control-allow-origin: ${ORIGIN:-http://localhost:3000}" "$D/h" && { pass=$((pass+1)); echo "ok     CORS allows the frontend site"; } || { failn=$((failn+1)); echo "FAIL   CORS header missing"; }
+curl -s -o /dev/null -X OPTIONS -H "Origin: https://evil.example" -H "Access-Control-Request-Method: POST" -D "$D/h2" "$UPURL"
+grep -qi "access-control-allow-origin" "$D/h2" && { failn=$((failn+1)); echo "FAIL   CORS must not allow other sites"; } || { pass=$((pass+1)); echo "ok     CORS refuses other sites"; }
+t "direct upload with a bad token" 401 -H "X-Upload-Token: 2.9999999999.deadbeef" -F "file=@$D/notes.pdf" "$UPURL"
+t "direct upload (token, no cookie)" 201 -H "X-Upload-Token: $UPTOK" -F "file=@$D/notes.pdf" -F title="Direct upload" "$UPURL"
+DIRECT=$(py "d['data']['id']")
+t "token is bound to its course" 401 -H "X-Upload-Token: $UPTOK" -F "file=@$D/notes.pdf" "${UPURL%/*}/999"
+t "remove the direct-upload test file" 200 "${A[@]}" -X DELETE $B/api/learn/materials/$DIRECT
 t "reject .txt file" 422 "${A[@]}" -F "file=@$D/readme.txt" $B/api/learn/courses/$CID/materials
 t "reject old .ppt with a clear reason" 422 "${A[@]}" -F "file=@$D/old.ppt" $B/api/learn/courses/$CID/materials
 check "  message says save as .pptx" "'.pptx' in d['message']"

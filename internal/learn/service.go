@@ -2,10 +2,14 @@ package learn
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,13 +33,14 @@ type Service struct {
 	db     *gorm.DB
 	ai     AI
 	limits Limits
+	appKey []byte // signs upload tokens
 	jobs   chan func()
 }
 
 // NewService starts `workers` background workers for AI jobs. AI calls never
 // run inside a request: the request saves a status and returns.
-func NewService(db *gorm.DB, ai AI, limits Limits, workers int) *Service {
-	s := &Service{db: db, ai: ai, limits: limits, jobs: make(chan func(), 256)}
+func NewService(db *gorm.DB, ai AI, limits Limits, appKey string, workers int) *Service {
+	s := &Service{db: db, ai: ai, limits: limits, appKey: []byte(appKey), jobs: make(chan func(), 256)}
 	for i := 0; i < workers; i++ {
 		go func() {
 			for job := range s.jobs {
@@ -115,6 +120,37 @@ func (s *Service) CanCreateCourse(userID int, isAdmin bool) (bool, string) {
 		return false, fmt.Sprintf("The free plan includes %d courses. Delete one to create another.", s.limits.CoursesPerUser)
 	}
 	return true, ""
+}
+
+// ── upload tokens: "<userID>.<unix expiry>.<hmac>", bound to one course ───
+
+func (s *Service) signUpload(courseID, userID int, exp int64) string {
+	m := hmac.New(sha256.New, s.appKey)
+	fmt.Fprintf(m, "upload|%d|%d|%d", courseID, userID, exp)
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+func (s *Service) UploadToken(courseID, userID int, exp time.Time) string {
+	e := exp.Unix()
+	return fmt.Sprintf("%d.%d.%s", userID, e, s.signUpload(courseID, userID, e))
+}
+
+// CheckUploadToken returns the user the token was issued to, if it is valid
+// for this course and not expired.
+func (s *Service) CheckUploadToken(token string, courseID int) (int, bool) {
+	p := strings.Split(token, ".")
+	if len(p) != 3 {
+		return 0, false
+	}
+	userID, err1 := strconv.Atoi(p[0])
+	exp, err2 := strconv.ParseInt(p[1], 10, 64)
+	if err1 != nil || err2 != nil || time.Now().Unix() > exp {
+		return 0, false
+	}
+	if !hmac.Equal([]byte(p[2]), []byte(s.signUpload(courseID, userID, exp))) {
+		return 0, false
+	}
+	return userID, true
 }
 
 // ── materials ────────────────────────────────────────────────────────────

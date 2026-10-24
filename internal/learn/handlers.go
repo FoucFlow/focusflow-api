@@ -19,9 +19,21 @@ import (
 	"gorm.io/gorm"
 )
 
-type Handler struct{ s *Service }
+type Handler struct {
+	s              *Service
+	publicURL      string          // where browsers reach the API (direct uploads)
+	allowedOrigins map[string]bool // frontend sites allowed to upload directly
+}
 
-func NewHandler(s *Service) *Handler { return &Handler{s: s} }
+func NewHandler(s *Service, publicURL string, origins []string) *Handler {
+	allowed := map[string]bool{}
+	for _, o := range origins {
+		if o = strings.TrimRight(strings.TrimSpace(o), "/"); o != "" {
+			allowed[o] = true
+		}
+	}
+	return &Handler{s: s, publicURL: strings.TrimRight(publicURL, "/"), allowedOrigins: allowed}
+}
 
 func fail(c *gin.Context, status int, msg string) {
 	c.JSON(status, gin.H{"message": msg, "error": msg})
@@ -96,51 +108,7 @@ func (h *Handler) AddMaterial(c *gin.Context) {
 	me := c.GetInt(auth.CtxUserID)
 
 	if strings.HasPrefix(c.ContentType(), "multipart/") {
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.s.limits.MaxFileBytes+(1<<20))
-		fh, err := c.FormFile("file")
-		if err != nil {
-			fail(c, http.StatusUnprocessableEntity, "Choose a file to upload (PDF or PowerPoint .pptx, up to "+mb(h.s.limits.MaxFileBytes)+").")
-			return
-		}
-		if fh.Size > h.s.limits.MaxFileBytes {
-			fail(c, http.StatusUnprocessableEntity, "This file is too large. The limit is "+mb(h.s.limits.MaxFileBytes)+".")
-			return
-		}
-		f, err := fh.Open()
-		if err != nil {
-			fail(c, http.StatusBadRequest, "Could not read the upload.")
-			return
-		}
-		data, err := io.ReadAll(io.LimitReader(f, h.s.limits.MaxFileBytes+1))
-		f.Close()
-		if err != nil || int64(len(data)) > h.s.limits.MaxFileBytes {
-			fail(c, http.StatusUnprocessableEntity, "This file is too large. The limit is "+mb(h.s.limits.MaxFileBytes)+".")
-			return
-		}
-		ext := strings.ToLower(filepath.Ext(fh.Filename))
-		var kind, mime string
-		switch {
-		case bytes.HasPrefix(data, pdfMagic):
-			kind, mime = KindPDF, "application/pdf"
-		case bytes.HasPrefix(data, zipMagic) && ext == ".pptx":
-			kind, mime = KindSlides, "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-		case ext == ".ppt":
-			fail(c, http.StatusUnprocessableEntity, "Old PowerPoint (.ppt) files are not supported. Save it as .pptx and upload again.")
-			return
-		default:
-			fail(c, http.StatusUnprocessableEntity, "Only PDF and PowerPoint (.pptx) files are supported.")
-			return
-		}
-		title := strings.TrimSpace(c.PostForm("title"))
-		if title == "" {
-			title = strings.TrimSuffix(filepath.Base(fh.Filename), filepath.Ext(fh.Filename))
-		}
-		m, err := h.s.AddFile(c.Request.Context(), course, me, kind, clip(title, 255), fh.Filename, mime, data)
-		if err != nil {
-			fail(c, http.StatusUnprocessableEntity, err.Error())
-			return
-		}
-		c.JSON(http.StatusCreated, gin.H{"data": m})
+		h.uploadFile(c, course, me)
 		return
 	}
 
@@ -182,6 +150,126 @@ func (h *Handler) AddMaterial(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"data": m})
+}
+
+// uploadFile stores a multipart PDF or .pptx ("file" + optional "title").
+func (h *Handler) uploadFile(c *gin.Context, course *coursemodels.Course, me int) {
+	if h.s.limits.MaterialsPerCourse > 0 && h.s.materialCount(*course.CourseId) >= h.s.limits.MaterialsPerCourse {
+		fail(c, http.StatusUnprocessableEntity, "The free plan allows "+strconv.Itoa(h.s.limits.MaterialsPerCourse)+" materials per course.")
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.s.limits.MaxFileBytes+(1<<20))
+	fh, err := c.FormFile("file")
+	if err != nil {
+		fail(c, http.StatusUnprocessableEntity, "Choose a file to upload (PDF or PowerPoint .pptx, up to "+mb(h.s.limits.MaxFileBytes)+").")
+		return
+	}
+	if fh.Size > h.s.limits.MaxFileBytes {
+		fail(c, http.StatusUnprocessableEntity, "This file is too large. The limit is "+mb(h.s.limits.MaxFileBytes)+".")
+		return
+	}
+	f, err := fh.Open()
+	if err != nil {
+		fail(c, http.StatusBadRequest, "Could not read the upload.")
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(f, h.s.limits.MaxFileBytes+1))
+	f.Close()
+	if err != nil || int64(len(data)) > h.s.limits.MaxFileBytes {
+		fail(c, http.StatusUnprocessableEntity, "This file is too large. The limit is "+mb(h.s.limits.MaxFileBytes)+".")
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(fh.Filename))
+	var kind, mime string
+	switch {
+	case bytes.HasPrefix(data, pdfMagic):
+		kind, mime = KindPDF, "application/pdf"
+	case bytes.HasPrefix(data, zipMagic) && ext == ".pptx":
+		kind, mime = KindSlides, "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	case ext == ".ppt":
+		fail(c, http.StatusUnprocessableEntity, "Old PowerPoint (.ppt) files are not supported. Save it as .pptx and upload again.")
+		return
+	default:
+		fail(c, http.StatusUnprocessableEntity, "Only PDF and PowerPoint (.pptx) files are supported.")
+		return
+	}
+	title := strings.TrimSpace(c.PostForm("title"))
+	if title == "" {
+		title = strings.TrimSuffix(filepath.Base(fh.Filename), filepath.Ext(fh.Filename))
+	}
+	m, err := h.s.AddFile(c.Request.Context(), course, me, kind, clip(title, 255), fh.Filename, mime, data)
+	if err != nil {
+		fail(c, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": m})
+}
+
+// ── direct browser uploads ───────────────────────────────────────────────
+// The frontend's proxy (Vercel) caps request bodies at ~4.5 MB, so files go
+// straight from the browser to the API with a short-lived signed token.
+
+const uploadTokenTTL = 10 * time.Minute
+
+// POST /api/learn/courses/:id/upload-url → {url, token, expires_at}
+func (h *Handler) UploadURL(c *gin.Context) {
+	course, ok := h.ownedCourse(c)
+	if !ok {
+		return
+	}
+	exp := time.Now().Add(uploadTokenTTL)
+	token := h.s.UploadToken(*course.CourseId, c.GetInt(auth.CtxUserID), exp)
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"url":        h.publicURL + "/api/learn/upload/" + strconv.Itoa(*course.CourseId),
+		"token":      token,
+		"expires_at": exp,
+		"max_bytes":  h.s.limits.MaxFileBytes,
+	}})
+}
+
+// POST /api/learn/upload/:id (header X-Upload-Token): the file itself.
+func (h *Handler) DirectUpload(c *gin.Context) {
+	id, ok := paramID(c, "id")
+	if !ok {
+		return
+	}
+	userID, valid := h.s.CheckUploadToken(c.GetHeader("X-Upload-Token"), id)
+	if !valid {
+		fail(c, http.StatusUnauthorized, "This upload link has expired. Please try again.")
+		return
+	}
+	course, err := h.s.course(id)
+	if err != nil || course.UserId != userID {
+		fail(c, http.StatusForbidden, "Only the course creator can do this.")
+		return
+	}
+	h.uploadFile(c, course, userID)
+}
+
+// uploadCORS lets the frontend's own sites (and only those) call DirectUpload.
+func (h *Handler) uploadCORS() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+		if origin != "" && h.allowedOrigins[origin] {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Vary", "Origin")
+			c.Header("Access-Control-Allow-Methods", "POST, OPTIONS")
+			c.Header("Access-Control-Allow-Headers", "Content-Type, X-Upload-Token")
+			c.Header("Access-Control-Max-Age", "600")
+		}
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
+}
+
+// GET /api/learn/categories
+func (h *Handler) Categories(c *gin.Context) {
+	cats := []coursemodels.Category{}
+	h.s.db.Order("category_id").Find(&cats)
+	c.JSON(http.StatusOK, gin.H{"data": cats})
 }
 
 var ytID = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
