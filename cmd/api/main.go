@@ -212,7 +212,7 @@ func wireMaterials(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 
 // wireLearn sets up the course builder (FEATURES.md step 1).
 func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
-	ai := learn.NewClaudeAI(cfg.AnthropicAPIKey, cfg.AIDigestModel, cfg.AIOrganiseModel)
+	ai := learn.NewClaudeAI(cfg.AnthropicAPIKey, cfg.AIDigestModel, cfg.AIOrganiseModel, cfg.AIEnrichModel)
 	if os.Getenv("AI_PROVIDER") == "fake" {
 		if cfg.IsProduction() {
 			slog.Error("AI_PROVIDER=fake is not allowed in production")
@@ -230,6 +230,10 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		OrganiseRunsPerCourse: cfg.FreeOrganiseRuns,
 	}
 	svc := learn.NewService(gdb, ai, limits, cfg.AppKey, 2)
+	// References by web search: whatever provider implements it (Claude, or fake)
+	if e, ok := ai.(learn.Enricher); ok && (cfg.AnthropicAPIKey != "" || os.Getenv("AI_PROVIDER") == "fake") {
+		svc.SetEnricher(e)
+	}
 	// Videos: Gemini watches them (concepts with timestamps)
 	if fake, ok := ai.(learn.FakeAI); ok {
 		svc.SetVideoAI(fake)

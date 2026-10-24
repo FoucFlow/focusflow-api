@@ -26,6 +26,7 @@ func (h *Handler) Routes(r *gin.Engine) {
 	g.POST("/courses/:id/materials", h.AddMaterial)
 	g.POST("/courses/:id/upload-url", h.UploadURL)
 	g.POST("/courses/:id/organise", h.Organise)
+	g.POST("/courses/:id/references", h.FindReferences)
 	g.POST("/courses/:id/units", h.AddUnit)
 	g.PUT("/courses/:id/units/order", h.ReorderUnits)
 	g.POST("/courses/:id/publish", h.Publish)

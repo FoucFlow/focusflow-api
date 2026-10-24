@@ -87,3 +87,27 @@ func TestSourceHintsAndLinks(t *testing.T) {
 		t.Fatalf("video link = %q", u)
 	}
 }
+
+func TestExtractJSONAndURLMatching(t *testing.T) {
+	for _, in := range []string{
+		"Here you go:\n```json\n{\"concepts\":[]}\n```\nDone.",
+		"{\"concepts\":[]}",
+		"Sure! {\"concepts\":[]} Hope this helps.",
+	} {
+		if got := extractJSON(in); got != `{"concepts":[]}` {
+			t.Errorf("extractJSON(%q) = %q", in, got)
+		}
+	}
+	if extractJSON("no json here") != "" {
+		t.Error("no object should give empty string")
+	}
+	same := []string{"https://www.example.com/a/", "http://example.com/a", "https://EXAMPLE.com/a#intro"}
+	for _, u := range same {
+		if normaliseURL(u) != normaliseURL(same[0]) {
+			t.Errorf("%q should match %q", u, same[0])
+		}
+	}
+	if normaliseURL("https://example.com/a?x=1") == normaliseURL("https://example.com/a?x=2") {
+		t.Error("different queries are different pages")
+	}
+}

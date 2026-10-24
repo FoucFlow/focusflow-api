@@ -79,6 +79,8 @@ for i in $(seq 1 20); do
   [ "$(py "d['data']['course']['organise_status']")" != "processing" ] && break; sleep 1
 done
 check "organised into units with materials" "d['data']['course']['organise_status']=='ready' and len(d['data']['units'])==4 and all(len(u['materials'])==1 for u in d['data']['units'])"
+for i in $(seq 1 20); do [ "$(py "d['data']['course']['references_status']")" = "ready" ] && break; sleep 1; curl -s "${A[@]}" -o "$D/out" $B/api/learn/courses/$CID; done
+check "  references found after organising" "d['data']['course']['references_status']=='ready' and all(len(c['references'])>=1 and c['references'][0]['url'].startswith('https://') for u in d['data']['units'] for c in u['concepts'])"
 check "  every unit has concepts with sources" "all(len(u['concepts'])>=1 and all(len(c['sources'])>=1 for c in u['concepts']) for u in d['data']['units'])"
 check "  PDF concept links to a page" "any(src['url'].endswith('#page=1') and src['hint']=='pages 1–2' for u in d['data']['units'] for c in u['concepts'] for src in c['sources'] if src['kind']=='pdf')"
 check "  video concept jumps to its timestamp" "any(src['url'].endswith('&t=30s') and src['hint']=='from 0:30' for u in d['data']['units'] for c in u['concepts'] for src in c['sources'] if src['kind']=='video')"
@@ -86,6 +88,14 @@ check "  slide concept shows slide number" "any(src['hint']=='slide 1' for u in 
 UNIT_A=$(py "d['data']['units'][0]['id']"); CON1=$(py "d['data']['units'][0]['concepts'][0]['id']"); CON2=$(py "d['data']['units'][0]['concepts'][1]['id']")
 t "edit a concept" 200 "${A[@]}" -X PUT "${J[@]}" -d '{"title":"Goroutines","explanation":"A **goroutine** is a lightweight thread."}' $B/api/learn/concepts/$CON1
 check "  edited, sources kept" "d['data'][0]['title']=='Goroutines' and len(d['data'][0]['sources'])>=1"
+REFURL=$(curl -s "${A[@]}" $B/api/learn/courses/$CID | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['units'][0]['concepts'][0]['references'][0]['url'])")
+t "creator removes a reference" 200 "${A[@]}" -X PUT "${J[@]}" -d '{"keep_reference_urls":[]}' $B/api/learn/concepts/$CON1
+check "  reference removed" "len([c for c in d['data'] if c['id']==$CON1][0]['references'])==0"
+t "creator cannot add a URL by hand" 200 "${A[@]}" -X PUT "${J[@]}" -d '{"keep_reference_urls":["https://evil.example/x"]}' $B/api/learn/concepts/$CON1
+check "  still none" "len([c for c in d['data'] if c['id']==$CON1][0]['references'])==0"
+t "find references again" 202 "${A[@]}" -X POST $B/api/learn/courses/$CID/references
+t "bob cannot trigger reference search" 403 "${Bo[@]}" -X POST $B/api/learn/courses/$CID/references
+sleep 2
 t "bob cannot edit a concept" 403 "${Bo[@]}" -X PUT "${J[@]}" -d '{"title":"x"}' $B/api/learn/concepts/$CON1
 t "reorder concepts" 200 "${A[@]}" -X PUT "${J[@]}" -d "{\"concept_ids\":[$CON2,$CON1]}" $B/api/learn/units/$UNIT_A/concepts/order
 check "  new order" "[c['id'] for c in d['data']]==[$CON2,$CON1]"

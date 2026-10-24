@@ -27,7 +27,8 @@ type Course struct {
 	OrganiseStatus    string     `json:"organise_status" gorm:"size:16;not null;default:idle"` // idle | processing | ready | failed
 	OrganiseError     string     `json:"organise_error,omitempty" gorm:"type:text"`
 	OrganiseRuns      int        `json:"organise_runs" gorm:"not null;default:0"`
-	PriceRWF          int        `json:"price_rwf" gorm:"not null;default:0"` // always 0 during the free pilot
+	ReferencesStatus  string     `json:"references_status" gorm:"size:16;not null;default:idle"` // idle | processing | ready | failed
+	PriceRWF          int        `json:"price_rwf" gorm:"not null;default:0"`                    // always 0 during the free pilot
 
 	Enrollments     []Enrollment `json:"enrollments,omitempty" gorm:"-"`
 	EnrollmentCount int          `json:"enrollment_count" gorm:"-"`

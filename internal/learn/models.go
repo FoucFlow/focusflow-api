@@ -55,8 +55,11 @@ type Digest struct {
 
 // SourceConcept is one concept found in one material, with its location.
 type SourceConcept struct {
-	Name         string `json:"name"`
-	Summary      string `json:"summary"`
+	Name    string `json:"name"`
+	Summary string `json:"summary"`
+	// Details is what the material itself says about the concept (definitions,
+	// steps, examples, formulas), so explanations are grounded in the source.
+	Details      string `json:"details,omitempty"`
 	Pages        []int  `json:"pages"`                   // PDF pages (1-based)
 	Slides       []int  `json:"slides"`                  // slide numbers
 	StartSeconds *int   `json:"start_seconds,omitempty"` // videos: where the concept starts
@@ -83,11 +86,22 @@ type Concept struct {
 	Title       string          `json:"title" gorm:"size:255;not null"`
 	Explanation string          `json:"explanation" gorm:"type:text"` // Markdown
 	Sources     []ConceptSource `json:"sources" gorm:"type:jsonb;serializer:json"`
-	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
+	// References are outside resources to expand knowledge, found by web search.
+	References []Reference `json:"references" gorm:"type:jsonb;serializer:json"`
+	CreatedAt  time.Time   `json:"created_at"`
+	UpdatedAt  time.Time   `json:"updated_at"`
 }
 
 func (Concept) TableName() string { return "unit_concepts" }
+
+// Reference is an outside resource for a concept. Its URL always comes from
+// real web search results (never typed by the model from memory).
+type Reference struct {
+	Title string `json:"title"`
+	URL   string `json:"url"`
+	Site  string `json:"site"` // e.g. "developer.mozilla.org"
+	Why   string `json:"why"`  // one line: what the learner gains
+}
 
 // ConceptSource points at the part of a material that covers a concept.
 type ConceptSource struct {

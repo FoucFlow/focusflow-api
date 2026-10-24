@@ -32,7 +32,8 @@ var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileByt
 type Service struct {
 	db      *gorm.DB
 	ai      AI
-	videoAI VideoAI // nil: videos are described by their title and note only
+	videoAI VideoAI  // nil: videos are described by their title and note only
+	refs    Enricher // nil: no "expand your knowledge" references
 	limits  Limits
 	appKey  []byte // signs upload tokens
 	jobs    chan func()
@@ -64,6 +65,67 @@ func (s *Service) enqueue(job func()) {
 // SetVideoAI turns on video reading (Gemini).
 func (s *Service) SetVideoAI(v VideoAI) { s.videoAI = v }
 
+// SetEnricher turns on reference finding (web search).
+func (s *Service) SetEnricher(e Enricher) { s.refs = e }
+
+// StartReferences queues the reference search for a course's concepts.
+func (s *Service) StartReferences(c *coursemodels.Course) error {
+	if s.refs == nil {
+		return errors.New("Finding references is not switched on yet on this server.")
+	}
+	res := s.db.Model(&coursemodels.Course{}).Where("course_id = ? AND references_status <> ?", *c.CourseId, StatusProcessing).
+		Update("references_status", StatusProcessing)
+	if res.RowsAffected == 0 {
+		return errors.New("References are already being found.")
+	}
+	id, owner := *c.CourseId, c.UserId
+	s.enqueue(func() { s.findReferences(id, owner) })
+	return nil
+}
+
+// findReferences runs unit by unit, so one failure does not lose the rest.
+func (s *Service) findReferences(courseID, ownerID int) {
+	c, err := s.course(courseID)
+	if err != nil {
+		return
+	}
+	failed := 0
+	for _, u := range s.units(courseID) {
+		var concepts []Concept
+		s.db.Where("unit_id = ?", u.ID).Order("position, id").Find(&concepts)
+		if len(concepts) == 0 {
+			continue
+		}
+		in := EnrichInput{CourseTitle: c.CourseTitle, Language: c.CourseLanguage, UnitTitle: u.Title}
+		for i, con := range concepts {
+			summary := con.Explanation
+			if len(summary) > 600 {
+				summary = summary[:600]
+			}
+			in.Concepts = append(in.Concepts, EnrichConcept{Index: i + 1, Title: con.Title, Summary: summary})
+		}
+		started := time.Now()
+		refs, usage, err := s.refs.FindReferences(context.Background(), in)
+		s.logUsage("references", courseID, ownerID, usage, started, err)
+		if err != nil {
+			slog.Warn("find references failed", "course", courseID, "unit", u.ID, "error", err)
+			failed++
+			continue
+		}
+		for i := range concepts {
+			if r, ok := refs[i+1]; ok {
+				concepts[i].References = r
+				s.db.Model(&concepts[i]).Select("references").Updates(&concepts[i])
+			}
+		}
+	}
+	status := StatusReady
+	if failed > 0 {
+		status = StatusFailed
+	}
+	s.db.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).Update("references_status", status)
+}
+
 // ResumePending re-queues work that was interrupted by a restart.
 func (s *Service) ResumePending() {
 	var mats []Material
@@ -78,7 +140,13 @@ func (s *Service) ResumePending() {
 		id, owner := *c.CourseId, c.UserId
 		s.enqueue(func() { s.organise(id, owner) })
 	}
-	if len(mats)+len(courses) > 0 {
+	var refCourses []coursemodels.Course
+	s.db.Where("references_status = ?", StatusProcessing).Find(&refCourses)
+	for _, c := range refCourses {
+		id, owner := *c.CourseId, c.UserId
+		s.enqueue(func() { s.findReferences(id, owner) })
+	}
+	if len(mats)+len(courses)+len(refCourses) > 0 {
 		slog.Info("resumed AI jobs", "materials", len(mats), "courses", len(courses))
 	}
 }
@@ -414,6 +482,11 @@ func (s *Service) organise(courseID, ownerID int) {
 		slog.Error("save organised units", "course", courseID, "error", err)
 		s.db.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).
 			Updates(map[string]any{"organise_status": StatusFailed, "organise_error": "Could not save the units. Please try again."})
+		return
+	}
+	// New units: look for "expand your knowledge" references in the background
+	if s.refs != nil {
+		_ = s.StartReferences(c)
 	}
 }
 
@@ -429,7 +502,7 @@ func organiseInput(c *coursemodels.Course, mats []Material) (OrganiseInput, map[
 		for i, sc := range m.Digest.Concepts {
 			cref := fmt.Sprintf("%s-C%d", mref, i+1)
 			refs[cref] = ConceptSource{MaterialID: m.ID, Pages: sc.Pages, Slides: sc.Slides, StartSeconds: sc.StartSeconds}
-			om.Concepts = append(om.Concepts, OrganiseConcept{Ref: cref, Name: sc.Name, Summary: sc.Summary})
+			om.Concepts = append(om.Concepts, OrganiseConcept{Ref: cref, Name: sc.Name, Summary: sc.Summary, Details: sc.Details})
 		}
 		in.Materials = append(in.Materials, om)
 	}

@@ -54,6 +54,7 @@ type Config struct {
 	AIDigestModel   string // reading PDFs and slides (cheap, bulk)
 	AIOrganiseModel string // organising courses into units
 	AIVideoModel    string // watching videos (Gemini)
+	AIEnrichModel   string // finding references with web search
 
 	FreeCourseLimit    int
 	FreeMaterialsLimit int
@@ -103,6 +104,7 @@ func Load() (*Config, error) {
 		AIDigestModel:   get("AI_DIGEST_MODEL", "claude-haiku-5-5"),
 		AIOrganiseModel: get("AI_ORGANISE_MODEL", "claude-opus-5-5"),
 		AIVideoModel:    get("AI_VIDEO_MODEL", "gemini-2.5-flash"),
+		AIEnrichModel:   get("AI_ENRICH_MODEL", "claude-opus-5-5"),
 
 		FreeCourseLimit:    getInt("FREE_COURSE_LIMIT", 2),
 		FreeMaterialsLimit: getInt("FREE_MATERIALS_PER_COURSE", 15),

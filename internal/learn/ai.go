@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ErrAIUnavailable means no AI provider is configured (no API key).
@@ -46,6 +47,7 @@ type OrganiseConcept struct {
 	Ref     string `json:"ref"` // "M12-C3"
 	Name    string `json:"name"`
 	Summary string `json:"summary"`
+	Details string `json:"details,omitempty"`
 }
 
 // Outline is the AI's proposed course: units made of concepts.
@@ -63,6 +65,24 @@ type OutlineConcept struct {
 	Title       string   `json:"title"`
 	Explanation string   `json:"explanation"`
 	Sources     []string `json:"sources"` // refs: "M12-C3" (a located concept) or "M14" (a whole material)
+}
+
+// Enricher finds outside references for a unit's concepts (web search).
+type Enricher interface {
+	FindReferences(ctx context.Context, in EnrichInput) (map[int][]Reference, Usage, error)
+}
+
+type EnrichInput struct {
+	CourseTitle string
+	Language    string
+	UnitTitle   string
+	Concepts    []EnrichConcept
+}
+
+type EnrichConcept struct {
+	Index   int    `json:"index"` // 1-based, as returned in the result map
+	Title   string `json:"title"`
+	Summary string `json:"summary"`
 }
 
 // Usage is what one AI call cost.
@@ -101,6 +121,16 @@ func (FakeAI) Digest(_ context.Context, in DigestInput) (Digest, Usage, error) {
 		d.Concepts = append(d.Concepts, c)
 	}
 	return d, Usage{Provider: "fake", Model: "fake"}, nil
+}
+
+// FindReferences: one reference per concept.
+func (FakeAI) FindReferences(_ context.Context, in EnrichInput) (map[int][]Reference, Usage, error) {
+	out := map[int][]Reference{}
+	for _, c := range in.Concepts {
+		out[c.Index] = []Reference{{Title: "About " + c.Title, URL: "https://en.wikipedia.org/wiki/Special:Search?search=" + strings.ReplaceAll(c.Title, " ", "+"),
+			Site: "en.wikipedia.org", Why: "A general overview of " + c.Title}}
+	}
+	return out, Usage{Provider: "fake", Model: "fake"}, nil
 }
 
 // DigestVideo: two concepts, at 0:30 and 2:00.

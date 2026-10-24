@@ -46,7 +46,7 @@ const videoDigestPrompt = `Watch this video for a course builder. Return:
 - summary: 2 to 4 sentences on what the video teaches.
 - topics: the main topics.
 - key_points: the most important takeaways.
-- concepts: every distinct concept the video teaches (usually 3 to 15), in the order they appear. For each: a short name, a 1 to 3 sentence summary of how THIS video explains it, and start_seconds: the moment (in seconds from the start) where the explanation of that concept begins.
+- concepts: every distinct concept the video teaches (usually 3 to 15), in the order they appear. For each: a short name; a 1 to 3 sentence summary of how THIS video explains it; details: what the video actually says and shows about it, faithfully and specifically (definitions, steps, examples, code or formulas shown on screen, warnings), 80 to 300 words; and start_seconds: the moment (in seconds from the start) where the explanation of that concept begins.
 Use only what is in the video; do not invent content. Write in the video's own language.`
 
 func videoDigestSchema() *genai.Schema {
@@ -62,9 +62,10 @@ func videoDigestSchema() *genai.Schema {
 				Properties: map[string]*genai.Schema{
 					"name":          str,
 					"summary":       str,
+					"details":       str,
 					"start_seconds": {Type: genai.TypeInteger},
 				},
-				Required: []string{"name", "summary", "start_seconds"},
+				Required: []string{"name", "summary", "details", "start_seconds"},
 			}},
 		},
 		Required: []string{"summary", "topics", "key_points", "concepts"},
@@ -126,6 +127,7 @@ func (g *geminiVideoAI) DigestVideo(ctx context.Context, youtubeID, title, note 
 		Concepts  []struct {
 			Name         string `json:"name"`
 			Summary      string `json:"summary"`
+			Details      string `json:"details"`
 			StartSeconds int    `json:"start_seconds"`
 		} `json:"concepts"`
 	}
@@ -138,7 +140,7 @@ func (g *geminiVideoAI) DigestVideo(ctx context.Context, youtubeID, title, note 
 		if start < 0 {
 			start = 0
 		}
-		d.Concepts = append(d.Concepts, SourceConcept{Name: c.Name, Summary: c.Summary, StartSeconds: &start})
+		d.Concepts = append(d.Concepts, SourceConcept{Name: c.Name, Summary: c.Summary, Details: c.Details, StartSeconds: &start})
 	}
 	return d, u, nil
 }

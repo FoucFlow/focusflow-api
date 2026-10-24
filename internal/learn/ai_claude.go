@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -26,10 +27,11 @@ type claudeAI struct {
 	client        anthropic.Client
 	digestModel   string // cheap bulk reading
 	organiseModel string // careful structuring and writing
+	enrichModel   string // web search for references
 }
 
 // NewClaudeAI returns the Claude provider, or a disabled one without a key.
-func NewClaudeAI(apiKey, digestModel, organiseModel string) AI {
+func NewClaudeAI(apiKey, digestModel, organiseModel, enrichModel string) AI {
 	if apiKey == "" {
 		return disabledAI{}
 	}
@@ -39,11 +41,15 @@ func NewClaudeAI(apiKey, digestModel, organiseModel string) AI {
 	if organiseModel == "" {
 		organiseModel = "claude-opus-5-5"
 	}
+	if enrichModel == "" {
+		enrichModel = organiseModel
+	}
 	return &claudeAI{
 		// The SDK retries 408/409/429/5xx and connection errors with backoff
 		client:        anthropic.NewClient(option.WithAPIKey(apiKey), option.WithMaxRetries(4)),
 		digestModel:   digestModel,
 		organiseModel: organiseModel,
+		enrichModel:   enrichModel,
 	}
 }
 
@@ -52,16 +58,32 @@ Return:
 - summary: 2 to 4 sentences on what the material covers.
 - topics: the main topics.
 - key_points: the most important takeaways.
-- concepts: every distinct concept the material teaches (usually 3 to 15). For each: a short name, a 1 to 3 sentence summary of how THIS material explains it, and where it appears: for a PDF the page numbers (1 = first page of the file), for slides the slide numbers (from the "Slide N:" labels). Leave the other list empty.
+- concepts: every distinct concept the material teaches (usually 3 to 15), in the order they appear. For each:
+  - name: a short name.
+  - summary: one or two sentences on how THIS material explains it.
+  - details: what the material actually says about it, faithfully and specifically: its definitions, steps, rules, formulas, worked examples, diagrams described in words, and any warnings or common mistakes it mentions (80 to 300 words). Keep the material's terminology. This is used to write accurate lessons, so do not generalise or add outside knowledge.
+  - pages: for a PDF, the page numbers where it is covered (1 = first page of the file); slides: for slides, the slide numbers (from the "Slide N:" labels). Leave the other list empty.
 Use only what is in the material; do not invent content. Write in the material's own language.`
 
-const organiseSystem = `You turn a creator's study materials into a course for self-taught learners and students. You are given each material's summary and the concepts found in it, each with a reference key (M12 is a material, M12-C3 is concept 3 of material 12).
+const organiseSystem = `You are an expert teacher turning a creator's study materials into a course for self-taught learners and students. You get each material's summary and the concepts found in it, each with what the material says about it ("details") and a reference key (M12 is a material, M12-C3 is concept 3 of material 12).
+
 Build the course:
-- 3 to 10 units in a sensible learning order, from foundations to advanced.
-- Each unit: a title, a short intro (2 to 4 sentences, Markdown), and its concepts in teaching order (usually 2 to 6 per unit).
-- Each concept: a clear title and an explanation (Markdown, 80 to 250 words) that teaches the idea using what the materials say, and its sources: the reference keys where learners can check it. When the same concept appears in several materials (notes, slides and videos), merge it into one concept and list every source, so a learner can read it in the notes and watch it in the video. Add a related link (its M key) as a source when its title or description clearly matches the concept.
-- Cover every concept from the materials somewhere. Do not invent facts beyond the materials; where they are thin, keep the explanation short.
-- Use only the reference keys given. Write in the course language.`
+- 3 to 10 units in a sensible learning order, from foundations to advanced; prerequisites come before the ideas that need them.
+- Each unit: a title, a short intro (2 to 4 sentences, Markdown) saying what the learner will be able to do after it, and its concepts in teaching order (usually 2 to 6).
+- Each concept gets a clear title, a one-sentence summary, and an explanation in Markdown (150 to 400 words) that breaks the idea down correctly, in this order, using bold labels:
+  **What it is**: a plain-language definition.
+  **How it works**: the idea step by step.
+  **Example**: a concrete example, taken from the materials whenever they have one.
+  **Watch out**: a common mistake or misconception.
+  **Check yourself**: one short question the learner can answer to test their understanding (no answer given).
+  Base every fact on the materials' details. Where they are thin, say less rather than guessing; never contradict them. Define every technical term the first time it appears.
+- sources: the reference keys where learners can check the concept. When the same concept appears in several materials (notes, slides, videos), merge it into one concept and list every source, so a learner can read it in the notes and watch it in the video. Add a related link (its M key) when its title or description clearly matches.
+- Cover every concept from the materials somewhere. Use only the reference keys given. Write in the course language.`
+
+const enrichSystem = `You help learners go beyond a course. For each concept you are given, use web search to find 2 or 3 high-quality, free resources that explain it well for a learner: official documentation, university course pages (for example MIT OpenCourseWare), Khan Academy, Wikipedia, well-known tutorial sites, or respected educational videos. Prefer resources in the course language; English is fine when nothing good exists in that language.
+Only use pages that appear in your search results. Never write a URL from memory.
+After searching, answer with ONLY a JSON object, no other text:
+{"concepts":[{"index":1,"references":[{"title":"...","url":"https://...","why":"one line on what the learner gains"}]}]}`
 
 func digestSchema() map[string]any {
 	intList := map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}
@@ -79,10 +101,11 @@ func digestSchema() map[string]any {
 					"properties": map[string]any{
 						"name":    map[string]any{"type": "string"},
 						"summary": map[string]any{"type": "string"},
+						"details": map[string]any{"type": "string"},
 						"pages":   intList,
 						"slides":  intList,
 					},
-					"required":             []string{"name", "summary", "pages", "slides"},
+					"required":             []string{"name", "summary", "details", "pages", "slides"},
 					"additionalProperties": false,
 				},
 			},
@@ -233,4 +256,133 @@ func (a *claudeAI) call(ctx context.Context, model, system string, blocks []anth
 		return u, fmt.Errorf("the AI returned an unreadable answer: %w", err)
 	}
 	return u, nil
+}
+
+// FindReferences searches the web for each concept of one unit and keeps only
+// URLs that appeared in the search results of this very call.
+func (a *claudeAI) FindReferences(ctx context.Context, in EnrichInput) (map[int][]Reference, Usage, error) {
+	ctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
+	defer cancel()
+	model := a.enrichModel
+	u := Usage{Provider: "claude", Model: model}
+
+	concepts, _ := json.Marshal(in.Concepts)
+	prompt := fmt.Sprintf("Course: %s\nCourse language: %s\nUnit: %s\n\n<concepts>\n%s\n</concepts>\n\nFind references for each concept.",
+		in.CourseTitle, in.Language, in.UnitTitle, concepts)
+	messages := []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(prompt))}
+	maxSearches := int64(2 + 2*len(in.Concepts))
+	if maxSearches > 12 {
+		maxSearches = 12
+	}
+	params := anthropic.BetaMessageNewParams{
+		Model:     anthropic.Model(model),
+		MaxTokens: 16000,
+		System:    []anthropic.BetaTextBlockParam{{Text: enrichSystem}},
+		Tools: []anthropic.BetaToolUnionParam{{OfWebSearchTool20260209: &anthropic.BetaWebSearchTool20260209Param{
+			MaxUses: anthropic.Int(maxSearches),
+		}}},
+		OutputConfig: anthropic.BetaOutputConfigParam{Effort: anthropic.BetaOutputConfigEffortMedium},
+	}
+	if strings.HasPrefix(model, "claude-opus") || strings.HasPrefix(model, "claude-sonnet") {
+		params.Fallbacks = anthropic.BetaFallbacksParamUnion{OfDefault: constant.ValueOf[constant.Default]()}
+		params.Betas = []anthropic.AnthropicBeta{anthropic.AnthropicBetaServerSideFallback2026_07_01}
+	}
+
+	found := map[string]string{} // URL from search results → its title
+	var text strings.Builder
+	// The server can pause a long search turn; continue it a few times
+	for turn := 0; turn < 4; turn++ {
+		params.Messages = messages
+		resp, err := a.client.Beta.Messages.New(ctx, params)
+		if err != nil {
+			return nil, u, fmt.Errorf("claude: %w", err)
+		}
+		u.InputTokens += resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens
+		u.OutputTokens += resp.Usage.OutputTokens
+		text.Reset()
+		for _, b := range resp.Content {
+			switch v := b.AsAny().(type) {
+			case anthropic.BetaWebSearchToolResultBlock:
+				for _, r := range v.Content.OfBetaWebSearchResultBlockArray {
+					found[normaliseURL(r.URL)] = r.Title
+				}
+			case anthropic.BetaTextBlock:
+				text.WriteString(v.Text)
+			}
+		}
+		if resp.StopReason == anthropic.BetaStopReasonRefusal {
+			return nil, u, fmt.Errorf("the AI declined this request")
+		}
+		if resp.StopReason != anthropic.BetaStopReasonPauseTurn {
+			break
+		}
+		messages = append(messages, resp.ToParam())
+	}
+	if p, ok := claudePrices[model]; ok {
+		u.CostMicroUSD = int64(float64(u.InputTokens)*p[0] + float64(u.OutputTokens)*p[1])
+	}
+
+	var out struct {
+		Concepts []struct {
+			Index      int `json:"index"`
+			References []struct {
+				Title string `json:"title"`
+				URL   string `json:"url"`
+				Why   string `json:"why"`
+			} `json:"references"`
+		} `json:"concepts"`
+	}
+	if err := json.Unmarshal([]byte(extractJSON(text.String())), &out); err != nil {
+		return nil, u, fmt.Errorf("the AI returned unreadable references: %w", err)
+	}
+	refs := map[int][]Reference{}
+	for _, c := range out.Concepts {
+		seen := map[string]bool{}
+		for _, r := range c.References {
+			key := normaliseURL(r.URL)
+			title, ok := found[key]
+			if !ok || seen[key] || len(refs[c.Index]) >= 3 {
+				continue // not from this call's search results: drop it
+			}
+			seen[key] = true
+			if strings.TrimSpace(r.Title) != "" {
+				title = r.Title
+			}
+			refs[c.Index] = append(refs[c.Index], Reference{Title: clip(title, 255), URL: r.URL, Site: siteOf(r.URL), Why: clip(r.Why, 300)})
+		}
+	}
+	return refs, u, nil
+}
+
+// extractJSON takes the JSON object out of a reply (fenced or bare).
+func extractJSON(s string) string {
+	if i := strings.Index(s, "```json"); i >= 0 {
+		s = s[i+7:]
+		if j := strings.Index(s, "```"); j >= 0 {
+			s = s[:j]
+		}
+	}
+	i, j := strings.Index(s, "{"), strings.LastIndex(s, "}")
+	if i < 0 || j < i {
+		return ""
+	}
+	return s[i : j+1]
+}
+
+func normaliseURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return strings.TrimSpace(raw)
+	}
+	u.Fragment = ""
+	u.Host = strings.TrimPrefix(strings.ToLower(u.Host), "www.")
+	u.Scheme = "https"
+	return strings.TrimRight(u.String(), "/")
+}
+
+func siteOf(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		return strings.TrimPrefix(strings.ToLower(u.Host), "www.")
+	}
+	return ""
 }

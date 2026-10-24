@@ -148,6 +148,19 @@ func (h *Handler) ownedConcept(c *gin.Context) (*Concept, bool) {
 	return &con, true
 }
 
+// POST /api/learn/courses/:id/references: search for references again
+func (h *Handler) FindReferences(c *gin.Context) {
+	course, ok := h.ownedCourse(c)
+	if !ok {
+		return
+	}
+	if err := h.s.StartReferences(course); err != nil {
+		fail(c, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"message": "Looking for references to expand each concept.", "references_status": StatusProcessing})
+}
+
 // POST /api/learn/units/:uid/concepts {title, explanation}
 func (h *Handler) AddConcept(c *gin.Context) {
 	u, _, ok := h.ownedUnit(c)
@@ -177,8 +190,9 @@ func (h *Handler) UpdateConcept(c *gin.Context) {
 		return
 	}
 	var in struct {
-		Title       *string `json:"title"`
-		Explanation *string `json:"explanation"`
+		Title       *string  `json:"title"`
+		Explanation *string  `json:"explanation"`
+		KeepRefs    []string `json:"keep_reference_urls"` // remove references not listed
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		fail(c, http.StatusBadRequest, "The request body must be valid JSON.")
@@ -198,6 +212,21 @@ func (h *Handler) UpdateConcept(c *gin.Context) {
 	}
 	if len(updates) > 0 {
 		h.s.db.Model(con).Updates(updates)
+	}
+	if in.KeepRefs != nil {
+		// Creators can only remove references, never add URLs by hand here
+		keep := map[string]bool{}
+		for _, u := range in.KeepRefs {
+			keep[u] = true
+		}
+		kept := []Reference{}
+		for _, r := range con.References {
+			if keep[r.URL] {
+				kept = append(kept, r)
+			}
+		}
+		con.References = kept
+		h.s.db.Model(con).Select("references").Updates(con)
 	}
 	h.s.db.First(con, con.ID)
 	c.JSON(http.StatusOK, gin.H{"data": h.s.unitConcepts([]int{con.UnitID})[con.UnitID]})
