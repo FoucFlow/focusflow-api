@@ -265,6 +265,10 @@ func (s *Service) digest(materialID int, data []byte) {
 	if d.KeyPoints == nil {
 		d.KeyPoints = []string{}
 	}
+	for i := range d.Concepts {
+		d.Concepts[i].Pages = mergeInts(nil, d.Concepts[i].Pages)
+		d.Concepts[i].Slides = mergeInts(nil, d.Concepts[i].Slides)
+	}
 	// Struct update (not a map) so the JSON serializer encodes the digest
 	m.Status, m.Error, m.Digest = StatusReady, "", d
 	if err := s.db.Model(&m).Select("status", "error", "digest").Updates(&m).Error; err != nil {
@@ -317,12 +321,8 @@ func (s *Service) organise(courseID, ownerID int) {
 	}
 	var mats []Material
 	s.db.Where("course_id = ? AND status = ?", courseID, StatusReady).Order("id").Find(&mats)
-	in := OrganiseInput{CourseTitle: c.CourseTitle, CourseDescription: c.CourseDescription, Language: c.CourseLanguage}
-	valid := map[int]bool{}
-	for _, m := range mats {
-		in.Materials = append(in.Materials, OrganiseMaterial{ID: m.ID, Kind: m.Kind, Title: m.Title, Digest: m.Digest})
-		valid[m.ID] = true
-	}
+	in, refs := organiseInput(c, mats)
+
 	started := time.Now()
 	outline, usage, err := s.ai.Organise(context.Background(), in)
 	s.logUsage("organise", courseID, ownerID, usage, started, err)
@@ -345,22 +345,34 @@ func (s *Service) organise(courseID, ownerID int) {
 			return err
 		}
 		for i, ou := range outline.Units {
-			u := Unit{CourseID: courseID, Position: i + 1, Title: strings.TrimSpace(ou.Title), Body: ou.Body, Source: "ai"}
+			u := Unit{CourseID: courseID, Position: i + 1, Title: strings.TrimSpace(ou.Title), Body: ou.Intro, Source: "ai"}
 			if u.Title == "" {
 				u.Title = fmt.Sprintf("Unit %d", i+1)
 			}
 			if err := tx.Create(&u).Error; err != nil {
 				return err
 			}
-			seen := map[int]bool{}
-			pos := 0
-			for _, mid := range ou.MaterialIDs {
-				if !valid[mid] || seen[mid] {
-					continue // ignore IDs the AI made up or repeated
+			var unitMats []int // materials cited by this unit's concepts, first-seen order
+			cited := map[int]bool{}
+			for j, oc := range ou.Concepts {
+				sources := resolveSources(oc.Sources, refs)
+				for _, src := range sources {
+					if !cited[src.MaterialID] {
+						cited[src.MaterialID] = true
+						unitMats = append(unitMats, src.MaterialID)
+					}
 				}
-				seen[mid] = true
-				pos++
-				if err := tx.Create(&UnitMaterial{UnitID: u.ID, MaterialID: mid, Position: pos}).Error; err != nil {
+				title := strings.TrimSpace(oc.Title)
+				if title == "" {
+					continue
+				}
+				if err := tx.Create(&Concept{UnitID: u.ID, Position: j + 1, Title: clip(title, 255),
+					Explanation: oc.Explanation, Sources: sources}).Error; err != nil {
+					return err
+				}
+			}
+			for k, mid := range unitMats {
+				if err := tx.Create(&UnitMaterial{UnitID: u.ID, MaterialID: mid, Position: k + 1}).Error; err != nil {
 					return err
 				}
 			}
@@ -375,6 +387,65 @@ func (s *Service) organise(courseID, ownerID int) {
 	}
 }
 
+// organiseInput gives each material a key ("M12") and each of its concepts
+// a key ("M12-C3"), and remembers where every key points.
+func organiseInput(c *coursemodels.Course, mats []Material) (OrganiseInput, map[string]ConceptSource) {
+	in := OrganiseInput{CourseTitle: c.CourseTitle, CourseDescription: c.CourseDescription, Language: c.CourseLanguage}
+	refs := map[string]ConceptSource{}
+	for _, m := range mats {
+		mref := fmt.Sprintf("M%d", m.ID)
+		refs[mref] = ConceptSource{MaterialID: m.ID}
+		om := OrganiseMaterial{Ref: mref, Kind: m.Kind, Title: m.Title, Summary: m.Digest.Summary}
+		for i, sc := range m.Digest.Concepts {
+			cref := fmt.Sprintf("%s-C%d", mref, i+1)
+			refs[cref] = ConceptSource{MaterialID: m.ID, Pages: sc.Pages, Slides: sc.Slides}
+			om.Concepts = append(om.Concepts, OrganiseConcept{Ref: cref, Name: sc.Name, Summary: sc.Summary})
+		}
+		in.Materials = append(in.Materials, om)
+	}
+	return in, refs
+}
+
+// resolveSources turns the AI's reference keys into locations. Unknown keys
+// (made up by the AI) are dropped; several keys into one material merge.
+func resolveSources(keys []string, refs map[string]ConceptSource) []ConceptSource {
+	byMaterial := map[int]*ConceptSource{}
+	var order []int
+	for _, k := range keys {
+		src, ok := refs[strings.ToUpper(strings.TrimSpace(k))]
+		if !ok {
+			continue
+		}
+		cur, seen := byMaterial[src.MaterialID]
+		if !seen {
+			cp := ConceptSource{MaterialID: src.MaterialID}
+			cur = &cp
+			byMaterial[src.MaterialID] = cur
+			order = append(order, src.MaterialID)
+		}
+		cur.Pages = mergeInts(cur.Pages, src.Pages)
+		cur.Slides = mergeInts(cur.Slides, src.Slides)
+	}
+	out := make([]ConceptSource, 0, len(order))
+	for _, id := range order {
+		out = append(out, *byMaterial[id])
+	}
+	return out
+}
+
+func mergeInts(a, b []int) []int {
+	seen := map[int]bool{}
+	var out []int
+	for _, v := range append(append([]int{}, a...), b...) {
+		if v > 0 && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	sort.Ints(out)
+	return out
+}
+
 func (s *Service) deleteUnits(tx *gorm.DB, courseID int) error {
 	var ids []int
 	tx.Model(&Unit{}).Where("course_id = ?", courseID).Pluck("id", &ids)
@@ -382,6 +453,9 @@ func (s *Service) deleteUnits(tx *gorm.DB, courseID int) error {
 		return nil
 	}
 	if err := tx.Where("unit_id IN ?", ids).Delete(&UnitMaterial{}).Error; err != nil {
+		return err
+	}
+	if err := tx.Where("unit_id IN ?", ids).Delete(&Concept{}).Error; err != nil {
 		return err
 	}
 	if err := tx.Where("unit_id IN ?", ids).Delete(&UnitProgress{}).Error; err != nil {

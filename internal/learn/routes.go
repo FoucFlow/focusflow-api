@@ -38,4 +38,8 @@ func (h *Handler) Routes(r *gin.Engine) {
 	g.PUT("/units/:uid", h.UpdateUnit)
 	g.DELETE("/units/:uid", h.DeleteUnit)
 	g.POST("/units/:uid/complete", h.CompleteUnit)
+	g.POST("/units/:uid/concepts", h.AddConcept)
+	g.PUT("/units/:uid/concepts/order", h.ReorderConcepts)
+	g.PUT("/concepts/:cid", h.UpdateConcept)
+	g.DELETE("/concepts/:cid", h.DeleteConcept)
 }

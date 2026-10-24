@@ -48,30 +48,61 @@ func NewClaudeAI(apiKey, digestModel, organiseModel string) AI {
 }
 
 const digestSystem = `You read one study material (lecture notes, slides, or a video or web page description) for a course builder.
-Return a faithful digest of what the material actually covers: a short summary, the main topics, and the key points a learner should take away.
-Use only what is in the material. Do not invent content. Write in the material's own language.`
+Return:
+- summary: 2 to 4 sentences on what the material covers.
+- topics: the main topics.
+- key_points: the most important takeaways.
+- concepts: every distinct concept the material teaches (usually 3 to 15). For each: a short name, a 1 to 3 sentence summary of how THIS material explains it, and where it appears: for a PDF the page numbers (1 = first page of the file), for slides the slide numbers (from the "Slide N:" labels). Leave the other list empty.
+Use only what is in the material; do not invent content. Write in the material's own language.`
 
-const organiseSystem = `You organise a creator's study materials into a course made of units, for self-taught learners and students.
-Rules:
-- Group materials into 3 to 10 units in a sensible learning order, from foundations to advanced topics.
-- Every unit gets a clear title and a unit text in Markdown (300 to 700 words) that explains the unit's ideas, written from the materials' digests. Do not invent facts beyond them; where the materials are thin, keep the text short.
-- List the material IDs that belong to each unit, in the order a learner should use them. Use only the IDs given. Every material should appear in at least one unit.
-- Write in the course language.`
+const organiseSystem = `You turn a creator's study materials into a course for self-taught learners and students. You are given each material's summary and the concepts found in it, each with a reference key (M12 is a material, M12-C3 is concept 3 of material 12).
+Build the course:
+- 3 to 10 units in a sensible learning order, from foundations to advanced.
+- Each unit: a title, a short intro (2 to 4 sentences, Markdown), and its concepts in teaching order (usually 2 to 6 per unit).
+- Each concept: a clear title and an explanation (Markdown, 80 to 250 words) that teaches the idea using what the materials say, and its sources: the reference keys where learners can check it. When the same concept appears in several materials, merge it into one concept and list every source. Add a related video or link (its M key) as a source when its title or description clearly matches the concept.
+- Cover every concept from the materials somewhere. Do not invent facts beyond the materials; where they are thin, keep the explanation short.
+- Use only the reference keys given. Write in the course language.`
 
 func digestSchema() map[string]any {
+	intList := map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}
+	strList := map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"summary":    map[string]any{"type": "string"},
-			"topics":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-			"key_points": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"topics":     strList,
+			"key_points": strList,
+			"concepts": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"name":    map[string]any{"type": "string"},
+						"summary": map[string]any{"type": "string"},
+						"pages":   intList,
+						"slides":  intList,
+					},
+					"required":             []string{"name", "summary", "pages", "slides"},
+					"additionalProperties": false,
+				},
+			},
 		},
-		"required":             []string{"summary", "topics", "key_points"},
+		"required":             []string{"summary", "topics", "key_points", "concepts"},
 		"additionalProperties": false,
 	}
 }
 
 func outlineSchema() map[string]any {
+	concept := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"title":       map[string]any{"type": "string"},
+			"explanation": map[string]any{"type": "string"},
+			"sources":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		},
+		"required":             []string{"title", "explanation", "sources"},
+		"additionalProperties": false,
+	}
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -80,11 +111,11 @@ func outlineSchema() map[string]any {
 				"items": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"title":        map[string]any{"type": "string"},
-						"body":         map[string]any{"type": "string"},
-						"material_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+						"title":    map[string]any{"type": "string"},
+						"intro":    map[string]any{"type": "string"},
+						"concepts": map[string]any{"type": "array", "items": concept},
 					},
-					"required":             []string{"title", "body", "material_ids"},
+					"required":             []string{"title", "intro", "concepts"},
 					"additionalProperties": false,
 				},
 			},
@@ -111,7 +142,7 @@ func (a *claudeAI) Digest(ctx context.Context, in DigestInput) (Digest, Usage, e
 	}
 
 	var d Digest
-	u, err := a.call(ctx, a.digestModel, digestSystem, blocks, digestSchema(), 4000, &d)
+	u, err := a.call(ctx, a.digestModel, digestSystem, blocks, digestSchema(), 16000, &d)
 	return d, u, err
 }
 
@@ -120,12 +151,12 @@ func (a *claudeAI) Organise(ctx context.Context, in OrganiseInput) (Outline, Usa
 	defer cancel()
 
 	materials, _ := json.Marshal(in.Materials)
-	prompt := fmt.Sprintf("Course title: %s\nCourse description: %s\nCourse language: %s\n\n<materials>\n%s\n</materials>\n\nOrganise these materials into units.",
+	prompt := fmt.Sprintf("Course title: %s\nCourse description: %s\nCourse language: %s\n\n<materials>\n%s\n</materials>\n\nBuild the course from these materials and concepts.",
 		in.CourseTitle, in.CourseDescription, in.Language, materials)
 
 	var o Outline
 	u, err := a.call(ctx, a.organiseModel, organiseSystem,
-		[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, outlineSchema(), 32000, &o)
+		[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, outlineSchema(), 64000, &o)
 	return o, u, err
 }
 
@@ -152,7 +183,25 @@ func (a *claudeAI) call(ctx context.Context, model, system string, blocks []anth
 		params.OutputConfig.Effort = anthropic.BetaOutputConfigEffortMedium
 	}
 
-	resp, err := a.client.Beta.Messages.New(ctx, params)
+	// Stream long answers so the HTTP request can't time out; short ones in one call
+	var resp *anthropic.BetaMessage
+	var err error
+	if maxTokens > 16000 {
+		stream := a.client.Beta.Messages.NewStreaming(ctx, params)
+		msg := anthropic.BetaMessage{}
+		for stream.Next() {
+			if aerr := msg.Accumulate(stream.Current()); aerr != nil {
+				err = aerr
+				break
+			}
+		}
+		if err == nil {
+			err = stream.Err()
+		}
+		resp = &msg
+	} else {
+		resp, err = a.client.Beta.Messages.New(ctx, params)
+	}
 	u := Usage{Provider: "claude", Model: model}
 	if err != nil {
 		var apiErr *anthropic.Error

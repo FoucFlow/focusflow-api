@@ -371,9 +371,11 @@ func (h *Handler) Organise(c *gin.Context) {
 
 type unitView struct {
 	Unit
-	Locked    bool       `json:"locked"`
-	Completed bool       `json:"completed"`
-	Materials []Material `json:"materials,omitempty"`
+	Locked       bool          `json:"locked"`
+	Completed    bool          `json:"completed"`
+	Materials    []Material    `json:"materials,omitempty"`
+	Concepts     []conceptView `json:"concepts,omitempty"`
+	ConceptNames []string      `json:"concept_names,omitempty"` // learner outline
 }
 
 // GET /api/learn/courses/:id: the creator's builder view, or the learner's view.
@@ -398,9 +400,10 @@ func (h *Handler) GetCourse(c *gin.Context) {
 		mats := []Material{}
 		h.s.db.Where("course_id = ?", id).Order("id").Find(&mats)
 		byUnit := h.s.unitMaterials(ids)
+		concepts := h.s.unitConcepts(ids)
 		views := make([]unitView, len(units))
 		for i, u := range units {
-			views[i] = unitView{Unit: u, Materials: byUnit[u.ID]}
+			views[i] = unitView{Unit: u, Materials: byUnit[u.ID], Concepts: concepts[u.ID]}
 		}
 		var learners int64
 		h.s.db.Model(&coursemodels.Enrollment{}).Where("course_id = ?", id).Count(&learners)
@@ -418,10 +421,15 @@ func (h *Handler) GetCourse(c *gin.Context) {
 	enrolled := h.s.isEnrolled(me, id)
 	done := h.s.completedUnits(me, id)
 	open := unlocked(units, done)
+	concepts := h.s.unitConcepts(ids)
 	views := make([]unitView, len(units))
 	for i, u := range units {
 		u.Body = "" // body only through GET /units/:uid
-		views[i] = unitView{Unit: u, Locked: !enrolled || !open[u.ID], Completed: done[u.ID]}
+		names := []string{}
+		for _, cv := range concepts[u.ID] {
+			names = append(names, cv.Title)
+		}
+		views[i] = unitView{Unit: u, Locked: !enrolled || !open[u.ID], Completed: done[u.ID], ConceptNames: names}
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"role": "learner", "course": course, "units": views, "enrolled": enrolled,
@@ -513,7 +521,7 @@ func (h *Handler) UpdateUnit(c *gin.Context) {
 		return
 	}
 	h.s.db.First(u, u.ID)
-	c.JSON(http.StatusOK, gin.H{"data": unitView{Unit: *u, Materials: h.s.unitMaterials([]int{u.ID})[u.ID]}})
+	c.JSON(http.StatusOK, gin.H{"data": unitView{Unit: *u, Materials: h.s.unitMaterials([]int{u.ID})[u.ID], Concepts: h.s.unitConcepts([]int{u.ID})[u.ID]}})
 }
 
 // DELETE /api/learn/units/:uid
@@ -527,6 +535,9 @@ func (h *Handler) DeleteUnit(c *gin.Context) {
 			return err
 		}
 		if err := tx.Where("unit_id = ?", u.ID).Delete(&UnitProgress{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("unit_id = ?", u.ID).Delete(&Concept{}).Error; err != nil {
 			return err
 		}
 		if err := tx.Delete(u).Error; err != nil {
@@ -702,7 +713,7 @@ func (h *Handler) GetUnit(c *gin.Context) {
 		return
 	}
 	me := c.GetInt(auth.CtxUserID)
-	view := unitView{Unit: u, Materials: h.s.unitMaterials([]int{u.ID})[u.ID]}
+	view := unitView{Unit: u, Materials: h.s.unitMaterials([]int{u.ID})[u.ID], Concepts: h.s.unitConcepts([]int{u.ID})[u.ID]}
 	if course.UserId == me || isAdmin(c) {
 		c.JSON(http.StatusOK, gin.H{"data": view})
 		return

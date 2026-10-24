@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"fmt"
 	"net/url"
 	"testing"
 )
@@ -43,5 +44,46 @@ func TestYouTubeID(t *testing.T) {
 		if got := YouTubeID(u); got != want {
 			t.Errorf("YouTubeID(%s) = %q, want %q", raw, got, want)
 		}
+	}
+}
+
+func TestResolveSourcesDropsUnknownAndMergesPerMaterial(t *testing.T) {
+	refs := map[string]ConceptSource{
+		"M1":    {MaterialID: 1},
+		"M1-C1": {MaterialID: 1, Pages: []int{4, 5}},
+		"M1-C2": {MaterialID: 1, Pages: []int{5, 6}},
+		"M2-C1": {MaterialID: 2, Slides: []int{7}},
+		"M3":    {MaterialID: 3},
+	}
+	got := resolveSources([]string{"m1-c1", "M9-C9", "M2-C1", "M1-C2", " M3 ", "M1-C2"}, refs)
+	if len(got) != 3 {
+		t.Fatalf("want 3 sources (materials 1, 2, 3), got %+v", got)
+	}
+	if got[0].MaterialID != 1 || fmt.Sprint(got[0].Pages) != "[4 5 6]" {
+		t.Fatalf("material 1 pages must merge to 4–6: %+v", got[0])
+	}
+	if got[1].MaterialID != 2 || fmt.Sprint(got[1].Slides) != "[7]" {
+		t.Fatalf("material 2: %+v", got[1])
+	}
+	if got[2].MaterialID != 3 || len(got[2].Pages)+len(got[2].Slides) != 0 {
+		t.Fatalf("material 3 (whole video): %+v", got[2])
+	}
+}
+
+func TestSourceHintsAndLinks(t *testing.T) {
+	if h := sourceHint(ConceptSource{Pages: []int{4, 5, 6, 9}}); h != "pages 4–6, 9" {
+		t.Fatalf("hint = %q", h)
+	}
+	if h := sourceHint(ConceptSource{Slides: []int{3}}); h != "slide 3" {
+		t.Fatalf("hint = %q", h)
+	}
+	pdf := Material{Kind: KindPDF, URL: "https://x/m.pdf"}
+	if u := sourceURL(pdf, ConceptSource{Pages: []int{12, 13}}); u != "https://x/m.pdf#page=12" {
+		t.Fatalf("pdf link = %q", u)
+	}
+	start := 750
+	vid := Material{Kind: KindVideo, YouTubeID: "dQw4w9WgXcQ"}
+	if u := sourceURL(vid, ConceptSource{StartSeconds: &start}); u != "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=750s" {
+		t.Fatalf("video link = %q", u)
 	}
 }

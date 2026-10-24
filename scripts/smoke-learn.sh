@@ -79,6 +79,19 @@ for i in $(seq 1 20); do
   [ "$(py "d['data']['course']['organise_status']")" != "processing" ] && break; sleep 1
 done
 check "organised into units with materials" "d['data']['course']['organise_status']=='ready' and len(d['data']['units'])==4 and all(len(u['materials'])==1 for u in d['data']['units'])"
+check "  every unit has concepts with sources" "all(len(u['concepts'])>=1 and all(len(c['sources'])>=1 for c in u['concepts']) for u in d['data']['units'])"
+check "  PDF concept links to a page" "any(src['url'].endswith('#page=1') and src['hint']=='pages 1–2' for u in d['data']['units'] for c in u['concepts'] for src in c['sources'] if src['kind']=='pdf')"
+check "  slide concept shows slide number" "any(src['hint']=='slide 1' for u in d['data']['units'] for c in u['concepts'] for src in c['sources'] if src['kind']=='slides')"
+UNIT_A=$(py "d['data']['units'][0]['id']"); CON1=$(py "d['data']['units'][0]['concepts'][0]['id']"); CON2=$(py "d['data']['units'][0]['concepts'][1]['id']")
+t "edit a concept" 200 "${A[@]}" -X PUT "${J[@]}" -d '{"title":"Goroutines","explanation":"A **goroutine** is a lightweight thread."}' $B/api/learn/concepts/$CON1
+check "  edited, sources kept" "d['data'][0]['title']=='Goroutines' and len(d['data'][0]['sources'])>=1"
+t "bob cannot edit a concept" 403 "${Bo[@]}" -X PUT "${J[@]}" -d '{"title":"x"}' $B/api/learn/concepts/$CON1
+t "reorder concepts" 200 "${A[@]}" -X PUT "${J[@]}" -d "{\"concept_ids\":[$CON2,$CON1]}" $B/api/learn/units/$UNIT_A/concepts/order
+check "  new order" "[c['id'] for c in d['data']]==[$CON2,$CON1]"
+t "add a concept by hand" 201 "${A[@]}" "${J[@]}" -d '{"title":"Channels","explanation":"Typed pipes."}' $B/api/learn/units/$UNIT_A/concepts
+CON3=$(py "d['data']['id']")
+t "delete that concept" 200 "${A[@]}" -X DELETE $B/api/learn/concepts/$CON3
+curl -s "${A[@]}" -o "$D/out" $B/api/learn/courses/$CID
 U1=$(py "d['data']['units'][0]['id']"); U2=$(py "d['data']['units'][1]['id']"); U3=$(py "d['data']['units'][2]['id']"); U4=$(py "d['data']['units'][3]['id']")
 M1=$(py "d['data']['materials'][0]['id']"); M2=$(py "d['data']['materials'][1]['id']")
 
@@ -103,8 +116,10 @@ t "bob cannot open a unit before joining" 404 "${Bo[@]}" $B/api/learn/units/$U1
 t "bob joins" 200 "${Bo[@]}" -X POST $B/api/learn/courses/$CID/join
 t "learner view after joining" 200 "${Bo[@]}" $B/api/learn/courses/$CID
 check "  only unit 1 open" "[u['locked'] for u in d['data']['units']]==[False,True,True,True]"
+check "  outline lists concept names, no explanations" "len(d['data']['units'][1]['concept_names'])>=1 and not d['data']['units'][1].get('concepts')"
 t "unit 1 opens" 200 "${Bo[@]}" $B/api/learn/units/$U1
 check "  with its text and materials" "d['data']['body']=='# Start here' and len(d['data']['materials'])==2"
+check "  with concepts and their sources" "any(c['title']=='Goroutines' and len(c['sources'])>=1 for c in d['data']['concepts'])"
 t "unit 2 is locked" 403 "${Bo[@]}" $B/api/learn/units/$U2
 t "cannot finish unit 2 first" 403 "${Bo[@]}" -X POST $B/api/learn/units/$U2/complete
 t "finish unit 1" 200 "${Bo[@]}" -X POST $B/api/learn/units/$U1/complete

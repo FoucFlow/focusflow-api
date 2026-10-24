@@ -44,11 +44,21 @@ type Material struct {
 
 func (Material) TableName() string { return "course_materials_v2" }
 
-// Digest is the AI's short reading of a material (F1.3).
+// Digest is the AI's reading of a material (F1.3): a summary plus the
+// concepts it teaches and where each one appears.
 type Digest struct {
-	Summary   string   `json:"summary"`
-	Topics    []string `json:"topics"`
-	KeyPoints []string `json:"key_points"`
+	Summary   string          `json:"summary"`
+	Topics    []string        `json:"topics"`
+	KeyPoints []string        `json:"key_points"`
+	Concepts  []SourceConcept `json:"concepts"`
+}
+
+// SourceConcept is one concept found in one material, with its location.
+type SourceConcept struct {
+	Name    string `json:"name"`
+	Summary string `json:"summary"`
+	Pages   []int  `json:"pages"`  // PDF pages (1-based)
+	Slides  []int  `json:"slides"` // slide numbers
 }
 
 // Unit is one section of a course (F1.5). Body is Markdown.
@@ -61,6 +71,29 @@ type Unit struct {
 	Source    string    `json:"source" gorm:"size:16;not null;default:manual"` // ai | manual
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Concept is one idea taught in a unit, explained from the materials and
+// linked to where learners can check it in the sources.
+type Concept struct {
+	ID          int             `json:"id" gorm:"primaryKey"`
+	UnitID      int             `json:"unit_id" gorm:"not null;index"`
+	Position    int             `json:"position" gorm:"not null"`
+	Title       string          `json:"title" gorm:"size:255;not null"`
+	Explanation string          `json:"explanation" gorm:"type:text"` // Markdown
+	Sources     []ConceptSource `json:"sources" gorm:"type:jsonb;serializer:json"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+}
+
+func (Concept) TableName() string { return "unit_concepts" }
+
+// ConceptSource points at the part of a material that covers a concept.
+type ConceptSource struct {
+	MaterialID   int   `json:"material_id"`
+	Pages        []int `json:"pages,omitempty"`
+	Slides       []int `json:"slides,omitempty"`
+	StartSeconds *int  `json:"start_seconds,omitempty"` // videos (needs transcripts; later step)
 }
 
 // UnitMaterial links a material into a unit, in order.
@@ -100,5 +133,5 @@ func (AIUsage) TableName() string { return "ai_usage" }
 
 // Models lists the tables this package owns, for AutoMigrate.
 func Models() []any {
-	return []any{&Material{}, &Unit{}, &UnitMaterial{}, &UnitProgress{}, &AIUsage{}}
+	return []any{&Material{}, &Unit{}, &Concept{}, &UnitMaterial{}, &UnitProgress{}, &AIUsage{}}
 }
