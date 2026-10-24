@@ -2,6 +2,7 @@ package learn
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"testing"
@@ -121,5 +122,29 @@ func TestSplitConcepts(t *testing.T) {
 	}
 	if missing := splitConcepts("### CONCEPT 1\nonly one", 2); missing[1] != "" {
 		t.Fatal("missing sections stay empty (then retried)")
+	}
+}
+
+func TestIsPublicIP(t *testing.T) {
+	for _, s := range []string{"127.0.0.1", "10.1.2.3", "172.19.0.5", "192.168.1.1", "169.254.169.254", "::1", "fc00::1", "0.0.0.0"} {
+		if isPublicIP(net.ParseIP(s)) {
+			t.Errorf("%s must be refused", s)
+		}
+	}
+	for _, s := range []string{"8.8.8.8", "151.101.1.69", "2606:4700::6810:84e5"} {
+		if !isPublicIP(net.ParseIP(s)) {
+			t.Errorf("%s should be allowed", s)
+		}
+	}
+}
+
+func TestFillExplanations(t *testing.T) {
+	unit := OutlineUnit{Concepts: []OutlineConcept{{Title: "A", Sources: []string{"M1-C1"}}, {Title: "B"}}}
+	written, ok := fillExplanations(unit, []string{"text A", "text B"})
+	if !ok || written[0].Explanation != "text A" || written[0].Sources[0] != "M1-C1" || written[1].Title != "B" {
+		t.Fatalf("written = %+v ok=%v", written, ok)
+	}
+	if _, ok := fillExplanations(unit, []string{"text A", "  "}); ok {
+		t.Fatal("a missing explanation must not count as complete")
 	}
 }

@@ -212,17 +212,8 @@ func wireMaterials(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 
 // wireLearn sets up the course builder (FEATURES.md step 1).
 func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
-	ai := learn.NewClaudeAI(cfg.AnthropicAPIKey, cfg.AIDigestModel, cfg.AIOrganiseModel, cfg.AIEnrichModel)
-	if os.Getenv("AI_PROVIDER") == "fake" {
-		if cfg.IsProduction() {
-			slog.Error("AI_PROVIDER=fake is not allowed in production")
-			os.Exit(1)
-		}
-		ai = learn.FakeAI{}
-		slog.Warn("using the fake AI provider (development only)")
-	} else if cfg.AnthropicAPIKey == "" {
-		slog.Warn("ANTHROPIC_API_KEY not set: material reading and AI organising are off")
-	}
+	ai, provider := chooseAI(cfg)
+	slog.Info("AI provider", "provider", provider)
 	limits := learn.Limits{
 		CoursesPerUser:        cfg.FreeCourseLimit,
 		MaterialsPerCourse:    cfg.FreeMaterialsLimit,
@@ -234,8 +225,8 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		slog.Info("AI monthly budget", "usd", cfg.AIMonthlyBudgetUSD)
 	}
 	svc := learn.NewService(gdb, ai, limits, cfg.AppKey, 2)
-	// References by web search: whatever provider implements it (Claude, or fake)
-	if e, ok := ai.(learn.Enricher); ok && (cfg.AnthropicAPIKey != "" || os.Getenv("AI_PROVIDER") == "fake") {
+	// References by web search: whatever provider implements it
+	if e, ok := ai.(learn.Enricher); ok && provider != "none" {
 		svc.SetEnricher(e)
 	}
 	// Videos: Gemini watches them (concepts with timestamps)
@@ -254,6 +245,44 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 	origins := append(strings.Split(os.Getenv("UPLOAD_ORIGINS"), ","), cfg.FrontendURL, wwwTwin(cfg.FrontendURL))
 	learn.NewHandler(svc, cfg.PublicURL, origins).Routes(r)
 	svc.ResumePending()
+}
+
+// chooseAI picks the course-builder AI: AI_PROVIDER=claude|gemini|fake, or
+// by default Claude when its key is set, otherwise Gemini.
+func chooseAI(cfg *config.Config) (learn.AI, string) {
+	provider := cfg.AIProvider
+	if provider == "" {
+		switch {
+		case cfg.AnthropicAPIKey != "":
+			provider = "claude"
+		case cfg.GeminiAPIKey != "":
+			provider = "gemini"
+		}
+	}
+	switch provider {
+	case "fake":
+		if cfg.IsProduction() {
+			slog.Error("AI_PROVIDER=fake is not allowed in production")
+			os.Exit(1)
+		}
+		slog.Warn("using the fake AI provider (development only)")
+		return learn.FakeAI{}, "fake"
+	case "gemini":
+		g, err := learn.NewGeminiAI(context.Background(), cfg.GeminiAPIKey, cfg.AIDigestModel, cfg.AIOrganiseModel, cfg.AIEnrichModel)
+		if err != nil || g == nil {
+			slog.Error("AI_PROVIDER=gemini but Gemini is not usable (GEMINI_API_KEY?)", "error", err)
+			return learn.NewClaudeAI("", "", "", ""), "none"
+		}
+		return g, "gemini"
+	case "claude":
+		if cfg.AnthropicAPIKey == "" {
+			slog.Warn("AI_PROVIDER=claude but ANTHROPIC_API_KEY is not set: material reading and AI organising are off")
+			return learn.NewClaudeAI("", "", "", ""), "none"
+		}
+		return learn.NewClaudeAI(cfg.AnthropicAPIKey, cfg.AIDigestModel, cfg.AIOrganiseModel, cfg.AIEnrichModel), "claude"
+	}
+	slog.Warn("no AI key set: material reading and AI organising are off")
+	return learn.NewClaudeAI("", "", "", ""), "none"
 }
 
 // wwwTwin turns https://www.x.com into https://x.com and back.

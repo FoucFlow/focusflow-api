@@ -49,7 +49,7 @@ func NewClaudeAI(apiKey, digestModel, organiseModel, enrichModel string) AI {
 		organiseModel = "claude-opus-5-5"
 	}
 	if enrichModel == "" {
-		enrichModel = organiseModel
+		enrichModel = "claude-sonnet-5-5" // picking links needs less judgment than teaching
 	}
 	return &claudeAI{
 		// The SDK retries 408/409/429/5xx and connection errors with backoff
@@ -286,6 +286,28 @@ func (a *claudeAI) Organise(ctx context.Context, in OrganiseInput) (Outline, Usa
 
 // writeUnit writes the explanations of one planned unit.
 func (a *claudeAI) writeUnit(ctx context.Context, in OrganiseInput, unit OutlineUnit, excerpts map[string]string) ([]OutlineConcept, Usage, error) {
+	prompt := unitWritePrompt(in, unit, excerpts)
+	var total Usage
+	var lastErr error
+	// One retry: a single bad answer should not fail the whole course
+	for attempt := 0; attempt < 2; attempt++ {
+		text, u, err := a.text(ctx, a.organiseModel, writeSystem,
+			[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, 64000)
+		total.add(u)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if written, ok := fillExplanations(unit, splitConcepts(text, len(unit.Concepts))); ok {
+			return written, total, nil
+		}
+		lastErr = fmt.Errorf("the AI did not write every explanation")
+	}
+	return nil, total, lastErr
+}
+
+// unitWritePrompt gives the writer one unit's concepts with their source excerpts.
+func unitWritePrompt(in OrganiseInput, unit OutlineUnit, excerpts map[string]string) string {
 	type item struct {
 		Title    string   `json:"title"`
 		Excerpts []string `json:"source_excerpts"`
@@ -301,36 +323,23 @@ func (a *claudeAI) writeUnit(ctx context.Context, in OrganiseInput, unit Outline
 		items[i] = it
 	}
 	body, _ := json.Marshal(items)
-	prompt := fmt.Sprintf("Course: %s\nCourse language: %s\nUnit: %s\nUnit intro: %s\n\n<concepts>\n%s\n</concepts>\n\nWrite the explanations for these %d concepts.",
+	return fmt.Sprintf("Course: %s\nCourse language: %s\nUnit: %s\nUnit intro: %s\n\n<concepts>\n%s\n</concepts>\n\nWrite the explanations for these %d concepts.",
 		in.CourseTitle, in.Language, unit.Title, unit.Intro, body, len(items))
+}
 
-	var total Usage
-	var lastErr error
-	// One retry: a single bad answer should not fail the whole course
-	for attempt := 0; attempt < 2; attempt++ {
-		text, u, err := a.text(ctx, a.organiseModel, writeSystem,
-			[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, 64000)
-		total.add(u)
-		if err != nil {
-			lastErr = err
-			continue
+// fillExplanations puts written sections into the plan's concepts (titles and
+// sources stay from the plan); ok only when every concept got one.
+func fillExplanations(unit OutlineUnit, parts []string) ([]OutlineConcept, bool) {
+	written := make([]OutlineConcept, len(unit.Concepts))
+	filled := 0
+	for i, c := range unit.Concepts {
+		written[i] = c
+		written[i].Explanation = parts[i]
+		if strings.TrimSpace(parts[i]) != "" {
+			filled++
 		}
-		parts := splitConcepts(text, len(unit.Concepts))
-		filled := 0
-		written := make([]OutlineConcept, len(unit.Concepts))
-		for i, c := range unit.Concepts {
-			written[i] = c
-			written[i].Explanation = parts[i]
-			if strings.TrimSpace(parts[i]) != "" {
-				filled++
-			}
-		}
-		if filled == len(unit.Concepts) {
-			return written, total, nil
-		}
-		lastErr = fmt.Errorf("the AI wrote %d of %d explanations", filled, len(unit.Concepts))
 	}
-	return nil, total, lastErr
+	return written, filled == len(unit.Concepts)
 }
 
 var conceptMarker = regexp.MustCompile(`(?m)^#{2,4}\s*CONCEPT\s+(\d+)\s*$`)

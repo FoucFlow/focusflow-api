@@ -55,6 +55,7 @@ type Config struct {
 	AIOrganiseModel string // organising courses into units
 	AIVideoModel    string // watching videos (Gemini)
 	AIEnrichModel   string // finding references with web search
+	AIProvider      string
 
 	AIMonthlyBudgetUSD float64
 
@@ -103,11 +104,13 @@ func Load() (*Config, error) {
 		GeminiGradeModel: os.Getenv("GEMINI_GRADE_MODEL"),
 
 		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
-		AIDigestModel:   get("AI_DIGEST_MODEL", "claude-haiku-5-5"),
-		AIOrganiseModel: get("AI_ORGANISE_MODEL", "claude-opus-5-5"),
+		// Empty = the chosen provider's default model
+		AIDigestModel:   os.Getenv("AI_DIGEST_MODEL"),
+		AIOrganiseModel: os.Getenv("AI_ORGANISE_MODEL"),
 		AIVideoModel:    get("AI_VIDEO_MODEL", "gemini-2.5-flash"),
 		// Picking links needs less judgment than teaching: Sonnet is cheaper
-		AIEnrichModel: get("AI_ENRICH_MODEL", "claude-sonnet-5-5"),
+		AIEnrichModel: os.Getenv("AI_ENRICH_MODEL"), // empty = the provider's default
+		AIProvider:    os.Getenv("AI_PROVIDER"),     // claude | gemini | fake (empty: claude if its key is set, else gemini)
 
 		AIMonthlyBudgetUSD: getFloat("AI_MONTHLY_BUDGET_USD", 0),
 
