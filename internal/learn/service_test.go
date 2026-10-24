@@ -2,8 +2,8 @@ package learn
 
 import (
 	"fmt"
-	"strings"
 	"net/url"
+	"strings"
 	"testing"
 )
 

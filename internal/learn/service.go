@@ -21,10 +21,13 @@ import (
 
 // Limits are the free-tier settings (FEATURES.md section 7).
 type Limits struct {
-	CoursesPerUser        int   `json:"courses_per_user"`
-	MaterialsPerCourse    int   `json:"materials_per_course"`
-	MaxFileBytes          int64 `json:"max_file_bytes"`
-	OrganiseRunsPerCourse int   `json:"organise_runs_per_course"`
+	// MonthlyBudgetUSD pauses new AI work once this calendar month's logged
+	// AI spend reaches it (0 = no cap). Set in AI_MONTHLY_BUDGET_USD.
+	MonthlyBudgetUSD      float64 `json:"-"`
+	CoursesPerUser        int     `json:"courses_per_user"`
+	MaterialsPerCourse    int     `json:"materials_per_course"`
+	MaxFileBytes          int64   `json:"max_file_bytes"`
+	OrganiseRunsPerCourse int     `json:"organise_runs_per_course"`
 }
 
 var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileBytes: 20 << 20, OrganiseRunsPerCourse: 3}
@@ -62,6 +65,28 @@ func (s *Service) enqueue(job func()) {
 	}
 }
 
+// ErrBudget means this month's AI budget is used up.
+var ErrBudget = errors.New("the monthly AI budget is used up")
+
+// MonthSpendUSD is the AI spend logged since the start of this month (UTC).
+func (s *Service) MonthSpendUSD() float64 {
+	now := time.Now().UTC()
+	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	var micro int64
+	s.db.Model(&AIUsage{}).Where("created_at >= ?", start).Select("COALESCE(SUM(cost_micro_usd), 0)").Scan(&micro)
+	return float64(micro) / 1e6
+}
+
+// checkBudget returns ErrBudget when the monthly cap is reached.
+func (s *Service) checkBudget() error {
+	if s.limits.MonthlyBudgetUSD > 0 && s.MonthSpendUSD() >= s.limits.MonthlyBudgetUSD {
+		return ErrBudget
+	}
+	return nil
+}
+
+const budgetMessage = "FocusFlow has reached its AI budget for this month, so new AI work is paused. Please try again later."
+
 // SetVideoAI turns on video reading (Gemini).
 func (s *Service) SetVideoAI(v VideoAI) { s.videoAI = v }
 
@@ -72,6 +97,9 @@ func (s *Service) SetEnricher(e Enricher) { s.refs = e }
 func (s *Service) StartReferences(c *coursemodels.Course) error {
 	if s.refs == nil {
 		return errors.New("Finding references is not switched on yet on this server.")
+	}
+	if err := s.checkBudget(); err != nil {
+		return errors.New(budgetMessage)
 	}
 	res := s.db.Model(&coursemodels.Course{}).Where("course_id = ? AND references_status <> ?", *c.CourseId, StatusProcessing).
 		Update("references_status", StatusProcessing)
@@ -95,6 +123,11 @@ func (s *Service) findReferences(courseID, ownerID int) {
 		s.db.Where("unit_id = ?", u.ID).Order("position, id").Find(&concepts)
 		if len(concepts) == 0 {
 			continue
+		}
+		if s.checkBudget() != nil {
+			slog.Warn("AI budget reached: reference search stopped", "course", courseID)
+			failed++
+			break
 		}
 		in := EnrichInput{CourseTitle: c.CourseTitle, Language: c.CourseLanguage, UnitTitle: u.Title}
 		for i, con := range concepts {
@@ -329,6 +362,11 @@ func (s *Service) digest(materialID int, data []byte) {
 		}
 		in.PDF = data
 	}
+	if err := s.checkBudget(); err != nil {
+		slog.Warn("AI budget reached: digest skipped", "material", m.ID)
+		s.failMaterial(&m, budgetMessage)
+		return
+	}
 	started := time.Now()
 	var d Digest
 	var usage Usage
@@ -388,6 +426,9 @@ func (s *Service) StartOrganise(c *coursemodels.Course) error {
 	}
 	if c.OrganiseStatus == StatusProcessing {
 		return errors.New("The course is already being organised.")
+	}
+	if err := s.checkBudget(); err != nil {
+		return errors.New(budgetMessage)
 	}
 	if s.limits.OrganiseRunsPerCourse > 0 && c.OrganiseRuns >= s.limits.OrganiseRunsPerCourse {
 		return fmt.Errorf("The free plan allows %d AI organise runs per course. You can still edit the units by hand.", s.limits.OrganiseRunsPerCourse)

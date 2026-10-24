@@ -56,6 +56,8 @@ type Config struct {
 	AIVideoModel    string // watching videos (Gemini)
 	AIEnrichModel   string // finding references with web search
 
+	AIMonthlyBudgetUSD float64
+
 	FreeCourseLimit    int
 	FreeMaterialsLimit int
 	FreeOrganiseRuns   int
@@ -104,7 +106,10 @@ func Load() (*Config, error) {
 		AIDigestModel:   get("AI_DIGEST_MODEL", "claude-haiku-5-5"),
 		AIOrganiseModel: get("AI_ORGANISE_MODEL", "claude-opus-5-5"),
 		AIVideoModel:    get("AI_VIDEO_MODEL", "gemini-2.5-flash"),
-		AIEnrichModel:   get("AI_ENRICH_MODEL", "claude-opus-5-5"),
+		// Picking links needs less judgment than teaching: Sonnet is cheaper
+		AIEnrichModel: get("AI_ENRICH_MODEL", "claude-sonnet-5-5"),
+
+		AIMonthlyBudgetUSD: getFloat("AI_MONTHLY_BUDGET_USD", 0),
 
 		FreeCourseLimit:    getInt("FREE_COURSE_LIMIT", 2),
 		FreeMaterialsLimit: getInt("FREE_MATERIALS_PER_COURSE", 15),
@@ -129,6 +134,13 @@ func (c *Config) IsProduction() bool { return c.Env == "production" }
 
 func get(key, def string) string {
 	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func getFloat(key string, def float64) float64 {
+	if v, err := strconv.ParseFloat(os.Getenv(key), 64); err == nil {
 		return v
 	}
 	return def

@@ -228,6 +228,10 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		MaterialsPerCourse:    cfg.FreeMaterialsLimit,
 		MaxFileBytes:          int64(cfg.MaxMaterialFileMB) << 20,
 		OrganiseRunsPerCourse: cfg.FreeOrganiseRuns,
+		MonthlyBudgetUSD:      cfg.AIMonthlyBudgetUSD,
+	}
+	if cfg.AIMonthlyBudgetUSD > 0 {
+		slog.Info("AI monthly budget", "usd", cfg.AIMonthlyBudgetUSD)
 	}
 	svc := learn.NewService(gdb, ai, limits, cfg.AppKey, 2)
 	// References by web search: whatever provider implements it (Claude, or fake)

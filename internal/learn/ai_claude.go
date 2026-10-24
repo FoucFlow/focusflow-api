@@ -19,6 +19,9 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/shared/constant"
 )
 
+// Web search is billed per search: $10 per 1,000.
+const webSearchMicroUSD = 10_000
+
 // Prices in USD per million tokens (input, output), for the usage log.
 var claudePrices = map[string][2]float64{
 	"claude-opus-5-5":   {4, 20},
@@ -513,6 +516,7 @@ func (a *claudeAI) FindReferences(ctx context.Context, in EnrichInput) (map[int]
 	}
 
 	found := map[string]string{} // URL from search results → its title
+	var searches int64
 	var text strings.Builder
 	// The server can pause a long search turn; continue it a few times
 	for turn := 0; turn < 4; turn++ {
@@ -523,6 +527,7 @@ func (a *claudeAI) FindReferences(ctx context.Context, in EnrichInput) (map[int]
 		}
 		u.InputTokens += resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens
 		u.OutputTokens += resp.Usage.OutputTokens
+		searches += resp.Usage.ServerToolUse.WebSearchRequests
 		text.Reset()
 		for _, b := range resp.Content {
 			switch v := b.AsAny().(type) {
@@ -545,6 +550,7 @@ func (a *claudeAI) FindReferences(ctx context.Context, in EnrichInput) (map[int]
 	if p, ok := claudePrices[model]; ok {
 		u.CostMicroUSD = int64(float64(u.InputTokens)*p[0] + float64(u.OutputTokens)*p[1])
 	}
+	u.CostMicroUSD += searches * webSearchMicroUSD
 
 	var out struct {
 		Concepts []struct {
