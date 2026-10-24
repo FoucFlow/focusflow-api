@@ -91,6 +91,30 @@ const digestFormat = `
 Answer with ONLY a JSON object, no other text, in exactly this shape:
 {"summary":"...","topics":["..."],"key_points":["..."],"concepts":[{"name":"...","summary":"...","details":"...","pages":[1,2],"slides":[]}]}`
 
+// pdfPrompt is the text sent with a PDF (or one part of it).
+func pdfPrompt(in DigestInput) string {
+	if in.ToPage > 0 {
+		return fmt.Sprintf("Title: %s\nThis file is pages %d to %d of a %d-page document. Number pages as in this file (1 = first page of this file).\nDigest this PDF.",
+			in.Title, in.FromPage, in.ToPage, in.TotalPages)
+	}
+	return "Title: " + in.Title + "\nDigest this PDF."
+}
+
+// planPrompt asks for the units; with ExistingUnits, only new ones that continue the course.
+func planPrompt(in OrganiseInput) string {
+	materials, _ := json.Marshal(in.Materials)
+	p := fmt.Sprintf("Course title: %s\nCourse description: %s\nCourse language: %s\n\n<materials>\n%s\n</materials>\n\n",
+		in.CourseTitle, in.CourseDescription, in.Language, materials)
+	if len(in.ExistingUnits) == 0 {
+		return p + "Plan the units."
+	}
+	existing, _ := json.Marshal(in.ExistingUnits)
+	return p + fmt.Sprintf("<existing_units>\n%s\n</existing_units>\n\n", existing) +
+		"The course already has the units above, made from the parts of the materials read earlier; they stay as they are. " +
+		"The materials above list only NEWLY read concepts. Plan only NEW units for them, coming after the existing units and continuing the course. " +
+		"Do not repeat what the existing units already teach.\n\nPlan the new units."
+}
+
 // validDigest rejects empty or skeleton readings.
 func validDigest(d Digest) error {
 	named := 0
@@ -230,7 +254,7 @@ func (a *claudeAI) Digest(ctx context.Context, in DigestInput) (Digest, Usage, e
 		blocks = append(blocks, anthropic.NewBetaDocumentBlock(anthropic.BetaBase64PDFSourceParam{
 			Data: base64.StdEncoding.EncodeToString(in.PDF),
 		}))
-		blocks = append(blocks, anthropic.NewBetaTextBlock("Title: "+in.Title+"\nDigest this PDF."))
+		blocks = append(blocks, anthropic.NewBetaTextBlock(pdfPrompt(in)))
 	default:
 		blocks = append(blocks, anthropic.NewBetaTextBlock(fmt.Sprintf(
 			"Material type: %s\nTitle: %s\n\n<material>\n%s\n</material>\n\nDigest this material.", in.Kind, in.Title, in.Text)))
@@ -253,9 +277,7 @@ func (a *claudeAI) Organise(ctx context.Context, in OrganiseInput) (Outline, Usa
 	defer cancel()
 	total := Usage{Provider: "claude", Model: a.organiseModel}
 
-	materials, _ := json.Marshal(in.Materials)
-	prompt := fmt.Sprintf("Course title: %s\nCourse description: %s\nCourse language: %s\n\n<materials>\n%s\n</materials>\n\nPlan the units.",
-		in.CourseTitle, in.CourseDescription, in.Language, materials)
+	prompt := planPrompt(in)
 	var plan Outline
 	u, err := a.call(ctx, a.organiseModel, planSystem,
 		[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, nil, 64000, &plan)

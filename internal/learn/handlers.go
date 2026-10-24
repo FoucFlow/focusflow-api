@@ -346,8 +346,8 @@ func (h *Handler) RetryMaterial(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if m.Status != StatusFailed || m.Kind == KindLink || (m.Kind == KindVideo && h.s.videoAI == nil) {
-		fail(c, http.StatusUnprocessableEntity, "Only a failed file or video can be retried.")
+	if (m.Status != StatusFailed && !partlyRead(m)) || m.Kind == KindLink || (m.Kind == KindVideo && h.s.videoAI == nil) {
+		fail(c, http.StatusUnprocessableEntity, "Only a failed or partly read file, or a failed video, can be retried.")
 		return
 	}
 	h.s.Retry(m)

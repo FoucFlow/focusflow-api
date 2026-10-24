@@ -3,6 +3,7 @@ package learn
 import (
 	"archive/zip"
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
@@ -58,5 +59,32 @@ func TestExtractPptxTextRejectsNonPptx(t *testing.T) {
 	}
 	if _, _, err := ExtractPptxText(makePptx(t, map[string]string{"word/document.xml": "<x/>"})); err == nil {
 		t.Fatal("a zip without slides must be rejected")
+	}
+}
+
+func TestBrokenPDFDoesNotPanic(t *testing.T) {
+	broken := []byte("%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n")
+	if n := pdfPageCount(broken); n != 0 {
+		t.Fatalf("unreadable PDF has no page count, got %d", n)
+	}
+	if _, err := pdfPages(broken, 1, 2); err == nil {
+		t.Fatal("splitting an unreadable PDF must fail")
+	}
+}
+
+func TestSplitPDF(t *testing.T) {
+	data, err := os.ReadFile("testdata/five-pages.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := pdfPageCount(data); n != 5 {
+		t.Fatalf("want 5 pages, got %d", n)
+	}
+	part, err := pdfPages(data, 3, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := pdfPageCount(part); n != 2 {
+		t.Fatalf("pages 3-4 make a 2-page part, got %d", n)
 	}
 }

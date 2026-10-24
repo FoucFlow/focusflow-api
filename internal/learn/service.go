@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"focusflow-api/internal/platform/storage"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Limits are the free-tier settings (FEATURES.md section 7).
@@ -30,9 +32,10 @@ type Limits struct {
 	OrganiseRunsPerCourse int     `json:"organise_runs_per_course"`
 	QuestionRunsPerUnit   int     `json:"question_runs_per_unit"` // AI question pools per unit
 	TestsPerDay           int     `json:"tests_per_day"`          // test starts per learner per day (written answers cost AI)
+	PartPages             int     `json:"part_pages"`             // long PDFs are read this many pages at a time (0 = whole file)
 }
 
-var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileBytes: 20 << 20, OrganiseRunsPerCourse: 3, QuestionRunsPerUnit: 3, TestsPerDay: 20}
+var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileBytes: 20 << 20, OrganiseRunsPerCourse: 3, QuestionRunsPerUnit: 3, TestsPerDay: 20, PartPages: 25}
 
 type Service struct {
 	db      *gorm.DB
@@ -52,11 +55,21 @@ func NewService(db *gorm.DB, ai AI, limits Limits, appKey string, workers int) *
 	for i := 0; i < workers; i++ {
 		go func() {
 			for job := range s.jobs {
-				job()
+				runJob(job)
 			}
 		}()
 	}
 	return s
+}
+
+// runJob runs one background job; a panic is logged instead of stopping the server.
+func runJob(job func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("background job panicked", "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	job()
 }
 
 func (s *Service) enqueue(job func()) {
@@ -64,7 +77,7 @@ func (s *Service) enqueue(job func()) {
 	case s.jobs <- job:
 	default:
 		// Queue full: run on its own goroutine rather than drop the work
-		go job()
+		go runJob(job)
 	}
 }
 
@@ -98,8 +111,12 @@ func (s *Service) SetVideoAI(v VideoAI) { s.videoAI = v }
 // SetEnricher turns on reference finding (web search).
 func (s *Service) SetEnricher(e Enricher) { s.refs = e }
 
-// StartReferences queues the reference search for a course's concepts.
-func (s *Service) StartReferences(c *coursemodels.Course) error {
+// StartReferences queues the reference search for all of a course's concepts.
+func (s *Service) StartReferences(c *coursemodels.Course) error { return s.startReferences(c, false) }
+
+// startReferences: onlyMissing skips concepts that were searched before
+// (used after new units are added for newly read pages).
+func (s *Service) startReferences(c *coursemodels.Course, onlyMissing bool) error {
 	if s.refs == nil {
 		return errors.New("Finding references is not switched on yet on this server.")
 	}
@@ -112,12 +129,12 @@ func (s *Service) StartReferences(c *coursemodels.Course) error {
 		return errors.New("References are already being found.")
 	}
 	id, owner := *c.CourseId, c.UserId
-	s.enqueue(func() { s.findReferences(id, owner) })
+	s.enqueue(func() { s.findReferences(id, owner, onlyMissing) })
 	return nil
 }
 
 // findReferences runs unit by unit, so one failure does not lose the rest.
-func (s *Service) findReferences(courseID, ownerID int) {
+func (s *Service) findReferences(courseID, ownerID int, onlyMissing bool) {
 	c, err := s.course(courseID)
 	if err != nil {
 		return
@@ -126,6 +143,15 @@ func (s *Service) findReferences(courseID, ownerID int) {
 	for _, u := range s.units(courseID) {
 		var concepts []Concept
 		s.db.Where("unit_id = ?", u.ID).Order("position, id").Find(&concepts)
+		if onlyMissing {
+			var todo []Concept
+			for _, con := range concepts {
+				if con.References == nil {
+					todo = append(todo, con)
+				}
+			}
+			concepts = todo
+		}
 		if len(concepts) == 0 {
 			continue
 		}
@@ -167,7 +193,7 @@ func (s *Service) findReferences(courseID, ownerID int) {
 // ResumePending re-queues work that was interrupted by a restart.
 func (s *Service) ResumePending() {
 	var mats []Material
-	s.db.Where("status = ?", StatusProcessing).Find(&mats)
+	s.db.Where("status = ? OR reading", StatusProcessing).Find(&mats)
 	for _, m := range mats {
 		id := m.ID
 		s.enqueue(func() { s.digest(id, nil) })
@@ -176,13 +202,17 @@ func (s *Service) ResumePending() {
 	s.db.Where("organise_status = ?", StatusProcessing).Find(&courses)
 	for _, c := range courses {
 		id, owner := *c.CourseId, c.UserId
-		s.enqueue(func() { s.organise(id, owner) })
+		if c.OrganiseMore {
+			s.enqueue(func() { s.extend(id, owner) })
+		} else {
+			s.enqueue(func() { s.organise(id, owner) })
+		}
 	}
 	var refCourses []coursemodels.Course
 	s.db.Where("references_status = ?", StatusProcessing).Find(&refCourses)
 	for _, c := range refCourses {
 		id, owner := *c.CourseId, c.UserId
-		s.enqueue(func() { s.findReferences(id, owner) })
+		s.enqueue(func() { s.findReferences(id, owner, false) })
 	}
 	tests := s.resumeTests()
 	if len(mats)+len(courses)+len(refCourses)+tests > 0 {
@@ -331,8 +361,17 @@ func (s *Service) AddLink(c *coursemodels.Course, ownerID int, kind, title, url,
 	return m, nil
 }
 
+// partlyRead: a long PDF whose reading stopped before the end.
+func partlyRead(m *Material) bool {
+	return m.Status == StatusReady && !m.Reading && m.ReadPages > 0 && m.ReadPages < m.TotalPages
+}
+
 func (s *Service) Retry(m *Material) {
-	s.db.Model(m).Updates(map[string]any{"status": StatusProcessing, "error": ""})
+	if partlyRead(m) {
+		s.db.Model(m).Updates(map[string]any{"reading": true, "error": ""})
+	} else {
+		s.db.Model(m).Updates(map[string]any{"status": StatusProcessing, "error": "", "read_pages": 0, "reading": false})
+	}
 	id := m.ID
 	s.enqueue(func() { s.digest(id, nil) })
 }
@@ -351,6 +390,9 @@ func (s *Service) DeleteMaterial(ctx context.Context, m *Material) error {
 }
 
 // digest runs in a worker. data is the PDF when the caller still has it.
+// A PDF longer than PartPages is read one part at a time: after each part
+// the material is ready with what was read so far, and the next part is
+// queued (see digestPart).
 func (s *Service) digest(materialID int, data []byte) {
 	var m Material
 	if err := s.db.First(&m, materialID).Error; err != nil {
@@ -367,6 +409,11 @@ func (s *Service) digest(materialID int, data []byte) {
 			}
 		}
 		in.PDF = data
+		pages := pdfPageCount(data)
+		if s.limits.PartPages > 0 && pages > s.limits.PartPages && s.digestPart(&m, data, pages) {
+			return
+		}
+		m.TotalPages = pages // short, or cannot be split: read in one piece
 	}
 	if err := s.checkBudget(); err != nil {
 		slog.Warn("AI budget reached: digest skipped", "material", m.ID)
@@ -391,18 +438,35 @@ func (s *Service) digest(materialID int, data []byte) {
 	s.logUsage(task, m.CourseID, m.OwnerID, usage, started, err)
 	if err != nil {
 		slog.Warn("digest failed", "material", m.ID, "error", err)
-		msg := "The AI could not read this material. Try again in a minute."
-		switch {
-		case errors.Is(err, ErrAIUnavailable):
-			msg = "AI reading is not switched on yet on this server."
-		case errors.Is(err, ErrAICredit):
-			msg = creditMessage
-		case m.Kind == KindVideo:
-			msg = "The AI could not watch this video (it may be private, age-restricted, too long, or the daily video limit was reached). Try again later."
-		}
-		s.failMaterial(&m, msg)
+		s.failMaterial(&m, digestErrorMessage(m.Kind, err))
 		return
 	}
+	cleanDigest(&d, 0)
+	// Struct update (not a map) so the JSON serializer encodes the digest
+	m.Status, m.Error, m.Digest, m.ReadPages, m.Reading = StatusReady, "", d, m.TotalPages, false
+	if err := s.db.Model(&m).Select("status", "error", "digest", "total_pages", "read_pages", "reading").Updates(&m).Error; err != nil {
+		slog.Error("save digest", "material", m.ID, "error", err)
+		s.failMaterial(&m, "Could not save what the AI read. Please retry.")
+	}
+}
+
+func digestErrorMessage(kind string, err error) string {
+	switch {
+	case errors.Is(err, ErrAIUnavailable):
+		return "AI reading is not switched on yet on this server."
+	case errors.Is(err, ErrAICredit):
+		return creditMessage
+	case errors.Is(err, ErrBudget):
+		return budgetMessage
+	case kind == KindVideo:
+		return "The AI could not watch this video (it may be private, age-restricted, too long, or the daily video limit was reached). Try again later."
+	}
+	return "The AI could not read this material. Try again in a minute."
+}
+
+// cleanDigest fills empty lists and moves page numbers by offset (the pages
+// before this part).
+func cleanDigest(d *Digest, offset int) {
 	if d.Topics == nil {
 		d.Topics = []string{}
 	}
@@ -410,15 +474,113 @@ func (s *Service) digest(materialID int, data []byte) {
 		d.KeyPoints = []string{}
 	}
 	for i := range d.Concepts {
-		d.Concepts[i].Pages = mergeInts(nil, d.Concepts[i].Pages)
+		pages := d.Concepts[i].Pages
+		for j := range pages {
+			pages[j] += offset
+		}
+		d.Concepts[i].Pages = mergeInts(nil, pages)
 		d.Concepts[i].Slides = mergeInts(nil, d.Concepts[i].Slides)
+		d.Concepts[i].Organised = false
 	}
-	// Struct update (not a map) so the JSON serializer encodes the digest
-	m.Status, m.Error, m.Digest = StatusReady, "", d
-	if err := s.db.Model(&m).Select("status", "error", "digest").Updates(&m).Error; err != nil {
-		slog.Error("save digest", "material", m.ID, "error", err)
-		s.failMaterial(&m, "Could not save what the AI read. Please retry.")
+}
+
+// digestPart reads the next part of a long PDF and adds it to the digest.
+// It returns false only when the first part cannot be cut out of the file;
+// the caller then reads the whole file in one piece.
+func (s *Service) digestPart(m *Material, data []byte, total int) bool {
+	from := m.ReadPages + 1
+	if from > total {
+		s.db.Model(m).Updates(map[string]any{"reading": false, "status": StatusReady})
+		return true
 	}
+	to := from + s.limits.PartPages - 1
+	if to > total {
+		to = total
+	}
+	first := m.ReadPages == 0
+	// A later part that fails keeps what was read; Retry continues from here
+	partFail := func(msg string) {
+		if first {
+			s.failMaterial(m, msg)
+			return
+		}
+		s.db.Model(m).Updates(map[string]any{"reading": false, "status": StatusReady,
+			"error": fmt.Sprintf("Pages %d to %d of %d were not read yet: %s", from, to, total, msg)})
+	}
+	part, err := pdfPages(data, from, to)
+	if err != nil {
+		slog.Warn("split pdf", "material", m.ID, "error", err)
+		if first {
+			return false
+		}
+		partFail("This PDF could not be split into parts. Try saving it again as PDF and uploading it.")
+		return true
+	}
+	if err := s.checkBudget(); err != nil {
+		partFail(budgetMessage)
+		return true
+	}
+	started := time.Now()
+	d, usage, err := s.ai.Digest(context.Background(), DigestInput{Kind: KindPDF, Title: m.Title, PDF: part,
+		FromPage: from, ToPage: to, TotalPages: total})
+	s.logUsage("digest", m.CourseID, m.OwnerID, usage, started, err)
+	if err != nil {
+		slog.Warn("digest part failed", "material", m.ID, "pages", fmt.Sprintf("%d-%d", from, to), "error", err)
+		partFail(digestErrorMessage(KindPDF, err))
+		return true
+	}
+	cleanDigest(&d, from-1)
+	more := to < total
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		var cur Material
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&cur, m.ID).Error; err != nil {
+			return err
+		}
+		cur.Digest = mergeDigests(cur.Digest, d, first)
+		cur.Status, cur.Error, cur.TotalPages, cur.ReadPages, cur.Reading = StatusReady, "", total, to, more
+		*m = cur
+		return tx.Model(&cur).Select("status", "error", "digest", "total_pages", "read_pages", "reading").Updates(&cur).Error
+	})
+	if err != nil {
+		slog.Error("save digest part", "material", m.ID, "error", err)
+		partFail("Could not save what the AI read. Please retry.")
+		return true
+	}
+	// Courses already organised get new units for these pages
+	s.maybeExtend(m.CourseID)
+	if more {
+		id := m.ID
+		s.enqueue(func() { s.digest(id, data) })
+	}
+	return true
+}
+
+// mergeDigests adds a newly read part to what was read before.
+func mergeDigests(old, part Digest, first bool) Digest {
+	if first {
+		return part
+	}
+	if old.Summary == "" {
+		old.Summary = part.Summary
+	}
+	old.Topics = appendNew(old.Topics, part.Topics, 60)
+	old.KeyPoints = appendNew(old.KeyPoints, part.KeyPoints, 80)
+	old.Concepts = append(old.Concepts, part.Concepts...)
+	return old
+}
+
+func appendNew(a, b []string, max int) []string {
+	seen := map[string]bool{}
+	for _, v := range a {
+		seen[strings.ToLower(v)] = true
+	}
+	for _, v := range b {
+		if k := strings.ToLower(v); !seen[k] && len(a) < max {
+			seen[k] = true
+			a = append(a, v)
+		}
+	}
+	return a
 }
 
 func (s *Service) failMaterial(m *Material, msg string) {
@@ -452,7 +614,7 @@ func (s *Service) StartOrganise(c *coursemodels.Course) error {
 	}
 	res := s.db.Model(&coursemodels.Course{}).
 		Where("course_id = ? AND organise_status <> ?", *c.CourseId, StatusProcessing).
-		Updates(map[string]any{"organise_status": StatusProcessing, "organise_error": "", "organise_runs": gorm.Expr("organise_runs + 1")})
+		Updates(map[string]any{"organise_status": StatusProcessing, "organise_more": false, "organise_error": "", "organise_runs": gorm.Expr("organise_runs + 1")})
 	if res.RowsAffected == 0 {
 		return errors.New("The course is already being organised.")
 	}
@@ -468,7 +630,7 @@ func (s *Service) organise(courseID, ownerID int) {
 	}
 	var mats []Material
 	s.db.Where("course_id = ? AND status = ?", courseID, StatusReady).Order("id").Find(&mats)
-	in, refs := organiseInput(c, mats)
+	in, refs, taken := organiseInput(c, mats, false)
 
 	started := time.Now()
 	outline, usage, err := s.ai.Organise(context.Background(), in)
@@ -493,38 +655,8 @@ func (s *Service) organise(courseID, ownerID int) {
 		if err := s.deleteUnits(tx, courseID); err != nil {
 			return err
 		}
-		for i, ou := range outline.Units {
-			u := Unit{CourseID: courseID, Position: i + 1, Title: strings.TrimSpace(ou.Title), Body: ou.Intro, Source: "ai"}
-			if u.Title == "" {
-				u.Title = fmt.Sprintf("Unit %d", i+1)
-			}
-			if err := tx.Create(&u).Error; err != nil {
-				return err
-			}
-			var unitMats []int // materials cited by this unit's concepts, first-seen order
-			cited := map[int]bool{}
-			for j, oc := range ou.Concepts {
-				sources := resolveSources(oc.Sources, refs)
-				for _, src := range sources {
-					if !cited[src.MaterialID] {
-						cited[src.MaterialID] = true
-						unitMats = append(unitMats, src.MaterialID)
-					}
-				}
-				title := strings.TrimSpace(oc.Title)
-				if title == "" {
-					continue
-				}
-				if err := tx.Create(&Concept{UnitID: u.ID, Position: j + 1, Title: clip(title, 255),
-					Explanation: oc.Explanation, Sources: sources}).Error; err != nil {
-					return err
-				}
-			}
-			for k, mid := range unitMats {
-				if err := tx.Create(&UnitMaterial{UnitID: u.ID, MaterialID: mid, Position: k + 1}).Error; err != nil {
-					return err
-				}
-			}
+		if err := saveUnits(tx, courseID, 0, outline, refs); err != nil {
+			return err
 		}
 		return tx.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).
 			Updates(map[string]any{"organise_status": StatusReady, "organise_error": ""}).Error
@@ -535,29 +667,81 @@ func (s *Service) organise(courseID, ownerID int) {
 			Updates(map[string]any{"organise_status": StatusFailed, "organise_error": "Could not save the units. Please try again."})
 		return
 	}
+	s.markOrganised(taken)
 	// New units: look for "expand your knowledge" references in the background
 	if s.refs != nil {
 		_ = s.StartReferences(c)
 	}
+	// Pages read while organising get units of their own
+	s.maybeExtend(courseID)
+}
+
+// saveUnits creates the outline's units from position start+1 on, with
+// their concepts and the materials those concepts cite.
+func saveUnits(tx *gorm.DB, courseID, start int, outline Outline, refs map[string]ConceptSource) error {
+	for i, ou := range outline.Units {
+		u := Unit{CourseID: courseID, Position: start + i + 1, Title: strings.TrimSpace(ou.Title), Body: ou.Intro, Source: "ai"}
+		if u.Title == "" {
+			u.Title = fmt.Sprintf("Unit %d", start+i+1)
+		}
+		if err := tx.Create(&u).Error; err != nil {
+			return err
+		}
+		var unitMats []int // materials cited by this unit's concepts, first-seen order
+		cited := map[int]bool{}
+		for j, oc := range ou.Concepts {
+			sources := resolveSources(oc.Sources, refs)
+			for _, src := range sources {
+				if !cited[src.MaterialID] {
+					cited[src.MaterialID] = true
+					unitMats = append(unitMats, src.MaterialID)
+				}
+			}
+			title := strings.TrimSpace(oc.Title)
+			if title == "" {
+				continue
+			}
+			if err := tx.Create(&Concept{UnitID: u.ID, Position: j + 1, Title: clip(title, 255),
+				Explanation: oc.Explanation, Sources: sources}).Error; err != nil {
+				return err
+			}
+		}
+		for k, mid := range unitMats {
+			if err := tx.Create(&UnitMaterial{UnitID: u.ID, MaterialID: mid, Position: k + 1}).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // organiseInput gives each material a key ("M12") and each of its concepts
 // a key ("M12-C3"), and remembers where every key points.
-func organiseInput(c *coursemodels.Course, mats []Material) (OrganiseInput, map[string]ConceptSource) {
+// onlyNew leaves out concepts already organised (keys stay the same).
+// taken is how many concepts of each material the input covers.
+func organiseInput(c *coursemodels.Course, mats []Material, onlyNew bool) (OrganiseInput, map[string]ConceptSource, map[int]int) {
 	in := OrganiseInput{CourseTitle: c.CourseTitle, CourseDescription: c.CourseDescription, Language: c.CourseLanguage}
 	refs := map[string]ConceptSource{}
+	taken := map[int]int{}
 	for _, m := range mats {
+		taken[m.ID] = len(m.Digest.Concepts)
 		mref := fmt.Sprintf("M%d", m.ID)
 		refs[mref] = ConceptSource{MaterialID: m.ID}
 		om := OrganiseMaterial{Ref: mref, Kind: m.Kind, Title: m.Title, Summary: m.Digest.Summary}
 		for i, sc := range m.Digest.Concepts {
 			cref := fmt.Sprintf("%s-C%d", mref, i+1)
 			refs[cref] = ConceptSource{MaterialID: m.ID, Pages: sc.Pages, Slides: sc.Slides, StartSeconds: sc.StartSeconds}
+			if onlyNew && sc.Organised {
+				continue
+			}
 			om.Concepts = append(om.Concepts, OrganiseConcept{Ref: cref, Name: sc.Name, Summary: sc.Summary, Details: sc.Details})
+		}
+		if onlyNew && len(om.Concepts) == 0 {
+			continue // nothing new in this material
 		}
 		in.Materials = append(in.Materials, om)
 	}
-	return in, refs
+	return in, refs, taken
 }
 
 // resolveSources turns the AI's reference keys into locations. Unknown keys

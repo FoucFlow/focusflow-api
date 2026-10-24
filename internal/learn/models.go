@@ -36,6 +36,11 @@ type Material struct {
 	Status     string `json:"status" gorm:"size:16;not null;default:processing"`
 	Error      string `json:"error,omitempty" gorm:"type:text"`
 	Digest     Digest `json:"digest" gorm:"type:jsonb;serializer:json"`
+	// Long PDFs are read in parts: the material is usable after the first
+	// part while the rest is read in the background (Reading).
+	TotalPages int  `json:"total_pages,omitempty"`
+	ReadPages  int  `json:"read_pages,omitempty"`
+	Reading    bool `json:"reading"`
 	// Text extracted from slides (sent to the AI instead of the file). Never in API output.
 	Text      string    `json:"-" gorm:"type:text"`
 	CreatedAt time.Time `json:"created_at"`
@@ -63,6 +68,8 @@ type SourceConcept struct {
 	Pages        []int  `json:"pages"`                   // PDF pages (1-based)
 	Slides       []int  `json:"slides"`                  // slide numbers
 	StartSeconds *int   `json:"start_seconds,omitempty"` // videos: where the concept starts
+	// Organised: already turned into units (later parts add new units only)
+	Organised bool `json:"organised,omitempty"`
 }
 
 // Unit is one section of a course (F1.5). Body is Markdown.

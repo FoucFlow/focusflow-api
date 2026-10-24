@@ -221,6 +221,7 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		OrganiseRunsPerCourse: cfg.FreeOrganiseRuns,
 		QuestionRunsPerUnit:   cfg.FreeQuestionRuns,
 		TestsPerDay:           cfg.TestsPerDay,
+		PartPages:             cfg.PDFPartPages,
 		MonthlyBudgetUSD:      cfg.AIMonthlyBudgetUSD,
 	}
 	if cfg.AIMonthlyBudgetUSD > 0 {

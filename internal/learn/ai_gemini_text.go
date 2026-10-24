@@ -134,7 +134,7 @@ func (g *geminiAI) Digest(ctx context.Context, in DigestInput) (Digest, Usage, e
 			defer g.client.Files.Delete(context.Background(), f.Name, nil)
 			parts = append(parts, genai.NewPartFromURI(f.URI, "application/pdf"))
 		}
-		parts = append(parts, genai.NewPartFromText("Title: "+in.Title+"\nDigest this PDF."))
+		parts = append(parts, genai.NewPartFromText(pdfPrompt(in)))
 	} else {
 		parts = append(parts, genai.NewPartFromText(fmt.Sprintf(
 			"Material type: %s\nTitle: %s\n\n<material>\n%s\n</material>\n\nDigest this material.", in.Kind, in.Title, in.Text)))
@@ -158,9 +158,7 @@ func (g *geminiAI) Organise(ctx context.Context, in OrganiseInput) (Outline, Usa
 	defer cancel()
 	total := Usage{Provider: "gemini", Model: g.organiseModel}
 
-	materials, _ := json.Marshal(in.Materials)
-	prompt := fmt.Sprintf("Course title: %s\nCourse description: %s\nCourse language: %s\n\n<materials>\n%s\n</materials>\n\nPlan the units.",
-		in.CourseTitle, in.CourseDescription, in.Language, materials)
+	prompt := planPrompt(in)
 	cfg := &genai.GenerateContentConfig{ResponseMIMEType: "application/json", Temperature: genai.Ptr[float32](0.3)}
 	_, text, u, err := g.generate(ctx, g.organiseModel, planSystem, []*genai.Part{genai.NewPartFromText(prompt)}, cfg)
 	total.add(u)

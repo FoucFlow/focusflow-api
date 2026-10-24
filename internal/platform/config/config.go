@@ -66,6 +66,7 @@ type Config struct {
 	FreeOrganiseRuns   int
 	FreeQuestionRuns   int // AI question pools per unit
 	TestsPerDay        int // test starts per learner per day
+	PDFPartPages       int // long PDFs are read this many pages at a time
 	MaxMaterialFileMB  int
 
 	AdminEmail    string // seeded admin account (created only if missing)
@@ -125,6 +126,7 @@ func Load() (*Config, error) {
 		FreeOrganiseRuns:   getInt("FREE_ORGANISE_RUNS", 3),
 		FreeQuestionRuns:   getInt("FREE_QUESTION_RUNS", 3),
 		TestsPerDay:        getInt("TESTS_PER_DAY", 20),
+		PDFPartPages:       getInt("AI_PDF_PART_PAGES", 25),
 		MaxMaterialFileMB:  getInt("MAX_MATERIAL_FILE_MB", 20),
 
 		AdminEmail:    os.Getenv("ADMIN_EMAIL"),

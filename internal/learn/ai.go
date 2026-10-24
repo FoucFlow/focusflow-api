@@ -86,8 +86,10 @@ type AI interface {
 type DigestInput struct {
 	Kind  string
 	Title string
-	PDF   []byte // KindPDF: the file itself
-	Text  string // KindSlides: extracted slide text; KindVideo/KindLink: title + description
+	PDF   []byte // KindPDF: the file itself (or one part of it)
+	// For one part of a long PDF: its pages in the whole document
+	FromPage, ToPage, TotalPages int
+	Text                         string // KindSlides: extracted slide text; KindVideo/KindLink: title + description
 }
 
 type OrganiseInput struct {
@@ -95,6 +97,14 @@ type OrganiseInput struct {
 	CourseDescription string
 	Language          string
 	Materials         []OrganiseMaterial
+	// ExistingUnits is set when adding units for newly read parts: the
+	// course's current units, which stay as they are.
+	ExistingUnits []ExistingUnit
+}
+
+type ExistingUnit struct {
+	Title    string   `json:"title"`
+	Concepts []string `json:"concepts"`
 }
 
 // OrganiseMaterial is what the organiser sees of one material: its summary
