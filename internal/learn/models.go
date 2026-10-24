@@ -55,10 +55,11 @@ type Digest struct {
 
 // SourceConcept is one concept found in one material, with its location.
 type SourceConcept struct {
-	Name    string `json:"name"`
-	Summary string `json:"summary"`
-	Pages   []int  `json:"pages"`  // PDF pages (1-based)
-	Slides  []int  `json:"slides"` // slide numbers
+	Name         string `json:"name"`
+	Summary      string `json:"summary"`
+	Pages        []int  `json:"pages"`                   // PDF pages (1-based)
+	Slides       []int  `json:"slides"`                  // slide numbers
+	StartSeconds *int   `json:"start_seconds,omitempty"` // videos: where the concept starts
 }
 
 // Unit is one section of a course (F1.5). Body is Markdown.

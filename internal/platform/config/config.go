@@ -53,6 +53,7 @@ type Config struct {
 	AnthropicAPIKey string
 	AIDigestModel   string // reading PDFs and slides (cheap, bulk)
 	AIOrganiseModel string // organising courses into units
+	AIVideoModel    string // watching videos (Gemini)
 
 	FreeCourseLimit    int
 	FreeMaterialsLimit int
@@ -101,6 +102,7 @@ func Load() (*Config, error) {
 		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
 		AIDigestModel:   get("AI_DIGEST_MODEL", "claude-haiku-5-5"),
 		AIOrganiseModel: get("AI_ORGANISE_MODEL", "claude-opus-5-5"),
+		AIVideoModel:    get("AI_VIDEO_MODEL", "gemini-2.5-flash"),
 
 		FreeCourseLimit:    getInt("FREE_COURSE_LIMIT", 2),
 		FreeMaterialsLimit: getInt("FREE_MATERIALS_PER_COURSE", 15),

@@ -103,6 +103,14 @@ func (FakeAI) Digest(_ context.Context, in DigestInput) (Digest, Usage, error) {
 	return d, Usage{Provider: "fake", Model: "fake"}, nil
 }
 
+// DigestVideo: two concepts, at 0:30 and 2:00.
+func (FakeAI) DigestVideo(_ context.Context, _, title, _ string) (Digest, Usage, error) {
+	a, b := 30, 120
+	return Digest{Summary: "Video digest of " + title, Topics: []string{title}, KeyPoints: []string{},
+		Concepts: []SourceConcept{{Name: title + " idea 1", Summary: "First idea", StartSeconds: &a},
+			{Name: title + " idea 2", Summary: "Second idea", StartSeconds: &b}}}, Usage{Provider: "fake", Model: "fake"}, nil
+}
+
 // Organise: one unit per material; its concepts (or the material itself) as sources.
 func (FakeAI) Organise(_ context.Context, in OrganiseInput) (Outline, Usage, error) {
 	var o Outline

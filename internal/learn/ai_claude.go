@@ -59,7 +59,7 @@ const organiseSystem = `You turn a creator's study materials into a course for s
 Build the course:
 - 3 to 10 units in a sensible learning order, from foundations to advanced.
 - Each unit: a title, a short intro (2 to 4 sentences, Markdown), and its concepts in teaching order (usually 2 to 6 per unit).
-- Each concept: a clear title and an explanation (Markdown, 80 to 250 words) that teaches the idea using what the materials say, and its sources: the reference keys where learners can check it. When the same concept appears in several materials, merge it into one concept and list every source. Add a related video or link (its M key) as a source when its title or description clearly matches the concept.
+- Each concept: a clear title and an explanation (Markdown, 80 to 250 words) that teaches the idea using what the materials say, and its sources: the reference keys where learners can check it. When the same concept appears in several materials (notes, slides and videos), merge it into one concept and list every source, so a learner can read it in the notes and watch it in the video. Add a related link (its M key) as a source when its title or description clearly matches the concept.
 - Cover every concept from the materials somewhere. Do not invent facts beyond the materials; where they are thin, keep the explanation short.
 - Use only the reference keys given. Write in the course language.`
 

@@ -230,6 +230,16 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		OrganiseRunsPerCourse: cfg.FreeOrganiseRuns,
 	}
 	svc := learn.NewService(gdb, ai, limits, cfg.AppKey, 2)
+	// Videos: Gemini watches them (concepts with timestamps)
+	if fake, ok := ai.(learn.FakeAI); ok {
+		svc.SetVideoAI(fake)
+	} else if video, err := learn.NewGeminiVideoAI(context.Background(), cfg.GeminiAPIKey, cfg.AIVideoModel); err != nil {
+		slog.Error("gemini video reader", "error", err)
+	} else if video != nil {
+		svc.SetVideoAI(video)
+	} else {
+		slog.Warn("GEMINI_API_KEY not set: videos are linked by title only (no concepts or timestamps)")
+	}
 	controllers.CanCreateCourse = svc.CanCreateCourse
 	// Sites allowed to upload files straight to the API: the frontend URL,
 	// its www/non-www twin, and any extra in UPLOAD_ORIGINS (comma-separated)

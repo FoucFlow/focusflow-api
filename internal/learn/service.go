@@ -30,11 +30,12 @@ type Limits struct {
 var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileBytes: 20 << 20, OrganiseRunsPerCourse: 3}
 
 type Service struct {
-	db     *gorm.DB
-	ai     AI
-	limits Limits
-	appKey []byte // signs upload tokens
-	jobs   chan func()
+	db      *gorm.DB
+	ai      AI
+	videoAI VideoAI // nil: videos are described by their title and note only
+	limits  Limits
+	appKey  []byte // signs upload tokens
+	jobs    chan func()
 }
 
 // NewService starts `workers` background workers for AI jobs. AI calls never
@@ -59,6 +60,9 @@ func (s *Service) enqueue(job func()) {
 		go job()
 	}
 }
+
+// SetVideoAI turns on video reading (Gemini).
+func (s *Service) SetVideoAI(v VideoAI) { s.videoAI = v }
 
 // ResumePending re-queues work that was interrupted by a restart.
 func (s *Service) ResumePending() {
@@ -206,8 +210,18 @@ func (s *Service) AddLink(c *coursemodels.Course, ownerID int, kind, title, url,
 		summary = title
 	}
 	m := &Material{CourseID: *c.CourseId, OwnerID: ownerID, Kind: kind, Title: title, URL: url,
-		YouTubeID: youtubeID, Status: StatusReady, Digest: Digest{Summary: summary, Topics: []string{}, KeyPoints: []string{}}}
-	return m, s.db.Create(m).Error
+		YouTubeID: youtubeID, Status: StatusReady, Text: note, Digest: Digest{Summary: summary, Topics: []string{}, KeyPoints: []string{}}}
+	if kind == KindVideo && s.videoAI != nil {
+		m.Status = StatusProcessing // Gemini watches it in the background
+	}
+	if err := s.db.Create(m).Error; err != nil {
+		return nil, err
+	}
+	if m.Status == StatusProcessing {
+		id := m.ID
+		s.enqueue(func() { s.digest(id, nil) })
+	}
+	return m, nil
 }
 
 func (s *Service) Retry(m *Material) {
@@ -248,13 +262,29 @@ func (s *Service) digest(materialID int, data []byte) {
 		in.PDF = data
 	}
 	started := time.Now()
-	d, usage, err := s.ai.Digest(ctx, in)
-	s.logUsage("digest", m.CourseID, m.OwnerID, usage, started, err)
+	var d Digest
+	var usage Usage
+	var err error
+	task := "digest"
+	if m.Kind == KindVideo {
+		task = "video_digest"
+		if s.videoAI == nil {
+			err = ErrAIUnavailable
+		} else {
+			d, usage, err = s.videoAI.DigestVideo(ctx, m.YouTubeID, m.Title, m.Text)
+		}
+	} else {
+		d, usage, err = s.ai.Digest(ctx, in)
+	}
+	s.logUsage(task, m.CourseID, m.OwnerID, usage, started, err)
 	if err != nil {
 		slog.Warn("digest failed", "material", m.ID, "error", err)
 		msg := "The AI could not read this material. Try again in a minute."
-		if errors.Is(err, ErrAIUnavailable) {
+		switch {
+		case errors.Is(err, ErrAIUnavailable):
 			msg = "AI reading is not switched on yet on this server."
+		case m.Kind == KindVideo:
+			msg = "The AI could not watch this video (it may be private, age-restricted, too long, or the daily video limit was reached). Try again later."
 		}
 		s.failMaterial(&m, msg)
 		return
@@ -398,7 +428,7 @@ func organiseInput(c *coursemodels.Course, mats []Material) (OrganiseInput, map[
 		om := OrganiseMaterial{Ref: mref, Kind: m.Kind, Title: m.Title, Summary: m.Digest.Summary}
 		for i, sc := range m.Digest.Concepts {
 			cref := fmt.Sprintf("%s-C%d", mref, i+1)
-			refs[cref] = ConceptSource{MaterialID: m.ID, Pages: sc.Pages, Slides: sc.Slides}
+			refs[cref] = ConceptSource{MaterialID: m.ID, Pages: sc.Pages, Slides: sc.Slides, StartSeconds: sc.StartSeconds}
 			om.Concepts = append(om.Concepts, OrganiseConcept{Ref: cref, Name: sc.Name, Summary: sc.Summary})
 		}
 		in.Materials = append(in.Materials, om)
@@ -425,6 +455,10 @@ func resolveSources(keys []string, refs map[string]ConceptSource) []ConceptSourc
 		}
 		cur.Pages = mergeInts(cur.Pages, src.Pages)
 		cur.Slides = mergeInts(cur.Slides, src.Slides)
+		if src.StartSeconds != nil && (cur.StartSeconds == nil || *src.StartSeconds < *cur.StartSeconds) {
+			v := *src.StartSeconds // earliest moment wins
+			cur.StartSeconds = &v
+		}
 	}
 	out := make([]ConceptSource, 0, len(order))
 	for _, id := range order {

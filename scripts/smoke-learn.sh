@@ -43,7 +43,7 @@ check "  course starts as draft" "d['data']['course']['course_status']=='draft' 
 t "upload PDF" 201 "${A[@]}" -F "file=@$D/notes.pdf" -F title="Lecture notes" $B/api/learn/courses/$CID/materials
 t "upload .pptx" 201 "${A[@]}" -F "file=@$D/slides.pptx" $B/api/learn/courses/$CID/materials
 t "add YouTube video" 201 "${A[@]}" "${J[@]}" -d '{"kind":"video","url":"https://youtu.be/dQw4w9WgXcQ","title":"Intro video"}' $B/api/learn/courses/$CID/materials
-check "  video id parsed, ready at once" "d['data']['youtube_id']=='dQw4w9WgXcQ' and d['data']['status']=='ready'"
+check "  video id parsed, being watched by the video AI" "d['data']['youtube_id']=='dQw4w9WgXcQ' and d['data']['status'] in ('processing','ready')"
 t "add web link" 201 "${A[@]}" "${J[@]}" -d '{"kind":"link","url":"https://go.dev/tour","title":"Go tour","note":"Official interactive tour"}' $B/api/learn/courses/$CID/materials
 t "categories" 200 "${A[@]}" $B/api/learn/categories
 check "  8 seeded categories" "len(d['data'])==8"
@@ -81,6 +81,7 @@ done
 check "organised into units with materials" "d['data']['course']['organise_status']=='ready' and len(d['data']['units'])==4 and all(len(u['materials'])==1 for u in d['data']['units'])"
 check "  every unit has concepts with sources" "all(len(u['concepts'])>=1 and all(len(c['sources'])>=1 for c in u['concepts']) for u in d['data']['units'])"
 check "  PDF concept links to a page" "any(src['url'].endswith('#page=1') and src['hint']=='pages 1–2' for u in d['data']['units'] for c in u['concepts'] for src in c['sources'] if src['kind']=='pdf')"
+check "  video concept jumps to its timestamp" "any(src['url'].endswith('&t=30s') and src['hint']=='from 0:30' for u in d['data']['units'] for c in u['concepts'] for src in c['sources'] if src['kind']=='video')"
 check "  slide concept shows slide number" "any(src['hint']=='slide 1' for u in d['data']['units'] for c in u['concepts'] for src in c['sources'] if src['kind']=='slides')"
 UNIT_A=$(py "d['data']['units'][0]['id']"); CON1=$(py "d['data']['units'][0]['concepts'][0]['id']"); CON2=$(py "d['data']['units'][0]['concepts'][1]['id']")
 t "edit a concept" 200 "${A[@]}" -X PUT "${J[@]}" -d '{"title":"Goroutines","explanation":"A **goroutine** is a lightweight thread."}' $B/api/learn/concepts/$CON1
