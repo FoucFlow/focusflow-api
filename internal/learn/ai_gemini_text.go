@@ -32,6 +32,7 @@ type geminiAI struct {
 
 func init() {
 	geminiPrices["gemini-2.5-pro"] = [2]float64{1.25, 10}
+	geminiPrices["gemini-3.1-pro-preview"] = [2]float64{2, 12}
 }
 
 // inlineLimit: larger PDFs go through the Files API (requests cap at ~20 MB).
@@ -50,14 +51,14 @@ func NewGeminiAI(ctx context.Context, apiKey, digestModel, organiseModel, enrich
 		digestModel = "gemini-2.5-flash"
 	}
 	if organiseModel == "" {
-		organiseModel = "gemini-2.5-pro"
+		organiseModel = "gemini-3.1-pro-preview" // 2.5-pro is closed to new API users
 	}
 	if enrichModel == "" {
 		enrichModel = "gemini-2.5-flash"
 	}
 	return &geminiAI{
 		client: client, digestModel: digestModel, organiseModel: organiseModel, enrichModel: enrichModel,
-		questionModel: "gemini-2.5-pro", markModel: "gemini-2.5-flash",
+		questionModel: "gemini-3.1-pro-preview", markModel: "gemini-2.5-flash",
 		http: &http.Client{
 			Timeout:   15 * time.Second,
 			Transport: publicOnlyTransport(),
