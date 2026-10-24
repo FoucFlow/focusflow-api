@@ -32,3 +32,22 @@ func TestRealOrganise(t *testing.T) {
 		_ = os.WriteFile(f, b, 0o600)
 	}
 }
+
+// REAL_CLAUDE_KEY=... REAL_PDF=/path/file.pdf go test -run TestRealDigestPDF -v ./internal/learn
+func TestRealDigestPDF(t *testing.T) {
+	key, path := os.Getenv("REAL_CLAUDE_KEY"), os.Getenv("REAL_PDF")
+	if key == "" || path == "" {
+		t.Skip("set REAL_CLAUDE_KEY and REAL_PDF to run")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ai := NewClaudeAI(key, "", "", "").(*claudeAI)
+	d, usage, err := ai.Digest(context.Background(), DigestInput{Kind: KindPDF, Title: "Lecture slides", PDF: data})
+	b, _ := json.MarshalIndent(d, "", "  ")
+	t.Logf("err=%v usage=%+v concepts=%d", err, usage, len(d.Concepts))
+	if f := os.Getenv("REAL_OUT"); f != "" {
+		_ = os.WriteFile(f, b, 0o600)
+	}
+}

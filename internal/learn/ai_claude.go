@@ -67,6 +67,25 @@ Return:
   - pages: for a PDF, the page numbers where it is covered (1 = first page of the file); slides: for slides, the slide numbers (from the "Slide N:" labels). Leave the other list empty.
 Use only what is in the material; do not invent content. Write in the material's own language.`
 
+const digestFormat = `
+
+Answer with ONLY a JSON object, no other text, in exactly this shape:
+{"summary":"...","topics":["..."],"key_points":["..."],"concepts":[{"name":"...","summary":"...","details":"...","pages":[1,2],"slides":[]}]}`
+
+// validDigest rejects empty or skeleton readings.
+func validDigest(d Digest) error {
+	named := 0
+	for _, c := range d.Concepts {
+		if strings.TrimSpace(c.Name) != "" && !strings.Contains(c.Name, "placeholder") {
+			named++
+		}
+	}
+	if strings.TrimSpace(d.Summary) == "" || named == 0 {
+		return fmt.Errorf("the AI returned an empty reading of this material")
+	}
+	return nil
+}
+
 const planSystem = `You are an expert teacher planning a course that a beginner can follow on their own, from a creator's study materials. You get every material's summary and ALL the concepts found in it (with what the material says, its "details") and a reference key (M12 is a material, M12-C3 is concept 3 of material 12).
 
 Plan the units:
@@ -200,8 +219,12 @@ func (a *claudeAI) Digest(ctx context.Context, in DigestInput) (Digest, Usage, e
 	}
 
 	var d Digest
-	// Generous budget: long documents can have dozens of concepts (streamed above 16k)
-	u, err := a.call(ctx, a.digestModel, digestSystem, blocks, digestSchema(), 48000, &d)
+	// Plain JSON answer, checked here: structured-output mode returned empty
+	// skeletons on large documents. Generous budget (streamed above 16k).
+	u, err := a.call(ctx, a.digestModel, digestSystem+digestFormat, blocks, nil, 48000, &d)
+	if err == nil {
+		err = validDigest(d)
+	}
 	return d, u, err
 }
 
