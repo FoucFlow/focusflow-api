@@ -1,0 +1,436 @@
+package learn
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"sort"
+	"strings"
+	"time"
+
+	coursemodels "focusflow-api/internal/course/models"
+	"focusflow-api/internal/platform/storage"
+
+	"gorm.io/gorm"
+)
+
+// Limits are the free-tier settings (FEATURES.md section 7).
+type Limits struct {
+	CoursesPerUser        int   `json:"courses_per_user"`
+	MaterialsPerCourse    int   `json:"materials_per_course"`
+	MaxFileBytes          int64 `json:"max_file_bytes"`
+	OrganiseRunsPerCourse int   `json:"organise_runs_per_course"`
+}
+
+var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileBytes: 20 << 20, OrganiseRunsPerCourse: 3}
+
+type Service struct {
+	db     *gorm.DB
+	ai     AI
+	limits Limits
+	jobs   chan func()
+}
+
+// NewService starts `workers` background workers for AI jobs. AI calls never
+// run inside a request: the request saves a status and returns.
+func NewService(db *gorm.DB, ai AI, limits Limits, workers int) *Service {
+	s := &Service{db: db, ai: ai, limits: limits, jobs: make(chan func(), 256)}
+	for i := 0; i < workers; i++ {
+		go func() {
+			for job := range s.jobs {
+				job()
+			}
+		}()
+	}
+	return s
+}
+
+func (s *Service) enqueue(job func()) {
+	select {
+	case s.jobs <- job:
+	default:
+		// Queue full: run on its own goroutine rather than drop the work
+		go job()
+	}
+}
+
+// ResumePending re-queues work that was interrupted by a restart.
+func (s *Service) ResumePending() {
+	var mats []Material
+	s.db.Where("status = ?", StatusProcessing).Find(&mats)
+	for _, m := range mats {
+		id := m.ID
+		s.enqueue(func() { s.digest(id, nil) })
+	}
+	var courses []coursemodels.Course
+	s.db.Where("organise_status = ?", StatusProcessing).Find(&courses)
+	for _, c := range courses {
+		id, owner := *c.CourseId, c.UserId
+		s.enqueue(func() { s.organise(id, owner) })
+	}
+	if len(mats)+len(courses) > 0 {
+		slog.Info("resumed AI jobs", "materials", len(mats), "courses", len(courses))
+	}
+}
+
+func (s *Service) logUsage(task string, courseID, userID int, u Usage, started time.Time, err error) {
+	row := AIUsage{
+		Task: task, Provider: u.Provider, Model: u.Model, CourseID: courseID, UserID: userID,
+		InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CostMicroUSD: u.CostMicroUSD,
+		DurationMS: time.Since(started).Milliseconds(), OK: err == nil,
+	}
+	if row.Provider == "" {
+		row.Provider = "none"
+	}
+	if row.Model == "" {
+		row.Model = "none"
+	}
+	if err != nil {
+		row.Error = err.Error()
+	}
+	s.db.Create(&row)
+}
+
+// ── courses ──────────────────────────────────────────────────────────────
+
+var errNotFound = errors.New("not found")
+
+func (s *Service) course(id int) (*coursemodels.Course, error) {
+	var c coursemodels.Course
+	if err := s.db.Where("course_id = ?", id).First(&c).Error; err != nil {
+		return nil, errNotFound
+	}
+	return &c, nil
+}
+
+// CanCreateCourse enforces the free-tier course count (admins are exempt).
+func (s *Service) CanCreateCourse(userID int, isAdmin bool) (bool, string) {
+	if isAdmin || s.limits.CoursesPerUser <= 0 {
+		return true, ""
+	}
+	var n int64
+	s.db.Model(&coursemodels.Course{}).Where("user_id = ?", userID).Count(&n)
+	if int(n) >= s.limits.CoursesPerUser {
+		return false, fmt.Sprintf("The free plan includes %d courses. Delete one to create another.", s.limits.CoursesPerUser)
+	}
+	return true, ""
+}
+
+// ── materials ────────────────────────────────────────────────────────────
+
+func (s *Service) materialCount(courseID int) int {
+	var n int64
+	s.db.Model(&Material{}).Where("course_id = ?", courseID).Count(&n)
+	return int(n)
+}
+
+// AddFile stores an uploaded PDF or .pptx and queues its digest.
+func (s *Service) AddFile(ctx context.Context, c *coursemodels.Course, ownerID int, kind, title, filename, mime string, data []byte) (*Material, error) {
+	m := &Material{CourseID: *c.CourseId, OwnerID: ownerID, Kind: kind, Title: title, MimeType: mime,
+		SizeBytes: int64(len(data)), Status: StatusProcessing}
+	if kind == KindSlides {
+		text, slides, err := ExtractPptxText(data)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(text) == "" {
+			return nil, errors.New("these slides contain no text to read (images-only slides are not supported yet)")
+		}
+		m.Text = text
+		_ = slides
+	}
+	if err := s.db.Create(m).Error; err != nil {
+		return nil, err
+	}
+	ext := map[string]string{KindPDF: ".pdf", KindSlides: ".pptx"}[kind]
+	key := fmt.Sprintf("courses/%d/materials/%d%s", m.CourseID, m.ID, ext)
+	url, err := storage.UploadKey(ctx, key, data, mime)
+	if err != nil {
+		s.db.Delete(m)
+		return nil, fmt.Errorf("could not store the file: %w", err)
+	}
+	m.URL, m.StorageKey = url, key
+	s.db.Model(m).Updates(map[string]any{"url": url, "storage_key": key})
+
+	id := m.ID
+	if kind == KindPDF {
+		s.enqueue(func() { s.digest(id, data) })
+	} else {
+		s.enqueue(func() { s.digest(id, nil) })
+	}
+	return m, nil
+}
+
+// AddLink saves a video or web link. Its digest is its title and note, so it
+// is ready at once (no AI call).
+func (s *Service) AddLink(c *coursemodels.Course, ownerID int, kind, title, url, youtubeID, note string) (*Material, error) {
+	summary := strings.TrimSpace(note)
+	if summary == "" {
+		summary = title
+	}
+	m := &Material{CourseID: *c.CourseId, OwnerID: ownerID, Kind: kind, Title: title, URL: url,
+		YouTubeID: youtubeID, Status: StatusReady, Digest: Digest{Summary: summary, Topics: []string{}, KeyPoints: []string{}}}
+	return m, s.db.Create(m).Error
+}
+
+func (s *Service) Retry(m *Material) {
+	s.db.Model(m).Updates(map[string]any{"status": StatusProcessing, "error": ""})
+	id := m.ID
+	s.enqueue(func() { s.digest(id, nil) })
+}
+
+func (s *Service) DeleteMaterial(ctx context.Context, m *Material) error {
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("material_id = ?", m.ID).Delete(&UnitMaterial{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(m).Error
+	})
+	if err == nil {
+		storage.DeleteKey(ctx, m.StorageKey)
+	}
+	return err
+}
+
+// digest runs in a worker. data is the PDF when the caller still has it.
+func (s *Service) digest(materialID int, data []byte) {
+	var m Material
+	if err := s.db.First(&m, materialID).Error; err != nil {
+		return
+	}
+	ctx := context.Background()
+	in := DigestInput{Kind: m.Kind, Title: m.Title, Text: m.Text}
+	if m.Kind == KindPDF {
+		if data == nil {
+			var err error
+			if data, err = storage.Get(ctx, m.StorageKey, s.limits.MaxFileBytes); err != nil {
+				s.failMaterial(&m, "Could not read the stored file. Please upload it again.")
+				return
+			}
+		}
+		in.PDF = data
+	}
+	started := time.Now()
+	d, usage, err := s.ai.Digest(ctx, in)
+	s.logUsage("digest", m.CourseID, m.OwnerID, usage, started, err)
+	if err != nil {
+		slog.Warn("digest failed", "material", m.ID, "error", err)
+		msg := "The AI could not read this material. Try again in a minute."
+		if errors.Is(err, ErrAIUnavailable) {
+			msg = "AI reading is not switched on yet on this server."
+		}
+		s.failMaterial(&m, msg)
+		return
+	}
+	if d.Topics == nil {
+		d.Topics = []string{}
+	}
+	if d.KeyPoints == nil {
+		d.KeyPoints = []string{}
+	}
+	// Struct update (not a map) so the JSON serializer encodes the digest
+	m.Status, m.Error, m.Digest = StatusReady, "", d
+	if err := s.db.Model(&m).Select("status", "error", "digest").Updates(&m).Error; err != nil {
+		slog.Error("save digest", "material", m.ID, "error", err)
+		s.failMaterial(&m, "Could not save what the AI read. Please retry.")
+	}
+}
+
+func (s *Service) failMaterial(m *Material, msg string) {
+	s.db.Model(m).Updates(map[string]any{"status": StatusFailed, "error": msg})
+}
+
+// ── organise (F1.4) ──────────────────────────────────────────────────────
+
+// StartOrganise checks the rules and queues the AI run.
+func (s *Service) StartOrganise(c *coursemodels.Course) error {
+	if c.CourseStatus == "published" {
+		return errors.New("Unpublish the course before organising it again (learners' progress depends on its units).")
+	}
+	if c.OrganiseStatus == StatusProcessing {
+		return errors.New("The course is already being organised.")
+	}
+	if s.limits.OrganiseRunsPerCourse > 0 && c.OrganiseRuns >= s.limits.OrganiseRunsPerCourse {
+		return fmt.Errorf("The free plan allows %d AI organise runs per course. You can still edit the units by hand.", s.limits.OrganiseRunsPerCourse)
+	}
+	var processing, ready int64
+	s.db.Model(&Material{}).Where("course_id = ? AND status = ?", *c.CourseId, StatusProcessing).Count(&processing)
+	s.db.Model(&Material{}).Where("course_id = ? AND status = ?", *c.CourseId, StatusReady).Count(&ready)
+	if processing > 0 {
+		return errors.New("Some materials are still being read. Wait until they are ready.")
+	}
+	if ready == 0 {
+		return errors.New("Add at least one material (and wait until it is ready) before organising.")
+	}
+	res := s.db.Model(&coursemodels.Course{}).
+		Where("course_id = ? AND organise_status <> ?", *c.CourseId, StatusProcessing).
+		Updates(map[string]any{"organise_status": StatusProcessing, "organise_error": "", "organise_runs": gorm.Expr("organise_runs + 1")})
+	if res.RowsAffected == 0 {
+		return errors.New("The course is already being organised.")
+	}
+	id, owner := *c.CourseId, c.UserId
+	s.enqueue(func() { s.organise(id, owner) })
+	return nil
+}
+
+func (s *Service) organise(courseID, ownerID int) {
+	c, err := s.course(courseID)
+	if err != nil {
+		return
+	}
+	var mats []Material
+	s.db.Where("course_id = ? AND status = ?", courseID, StatusReady).Order("id").Find(&mats)
+	in := OrganiseInput{CourseTitle: c.CourseTitle, CourseDescription: c.CourseDescription, Language: c.CourseLanguage}
+	valid := map[int]bool{}
+	for _, m := range mats {
+		in.Materials = append(in.Materials, OrganiseMaterial{ID: m.ID, Kind: m.Kind, Title: m.Title, Digest: m.Digest})
+		valid[m.ID] = true
+	}
+	started := time.Now()
+	outline, usage, err := s.ai.Organise(context.Background(), in)
+	s.logUsage("organise", courseID, ownerID, usage, started, err)
+	if err == nil && len(outline.Units) == 0 {
+		err = errors.New("the AI proposed no units")
+	}
+	if err != nil {
+		slog.Warn("organise failed", "course", courseID, "error", err)
+		msg := "The AI could not organise this course. Try again in a minute; this run was not counted."
+		if errors.Is(err, ErrAIUnavailable) {
+			msg = "AI organising is not switched on yet on this server."
+		}
+		// A failed run does not use up the creator's allowance
+		s.db.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).Updates(map[string]any{
+			"organise_status": StatusFailed, "organise_error": msg, "organise_runs": gorm.Expr("GREATEST(organise_runs - 1, 0)")})
+		return
+	}
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		if err := s.deleteUnits(tx, courseID); err != nil {
+			return err
+		}
+		for i, ou := range outline.Units {
+			u := Unit{CourseID: courseID, Position: i + 1, Title: strings.TrimSpace(ou.Title), Body: ou.Body, Source: "ai"}
+			if u.Title == "" {
+				u.Title = fmt.Sprintf("Unit %d", i+1)
+			}
+			if err := tx.Create(&u).Error; err != nil {
+				return err
+			}
+			seen := map[int]bool{}
+			pos := 0
+			for _, mid := range ou.MaterialIDs {
+				if !valid[mid] || seen[mid] {
+					continue // ignore IDs the AI made up or repeated
+				}
+				seen[mid] = true
+				pos++
+				if err := tx.Create(&UnitMaterial{UnitID: u.ID, MaterialID: mid, Position: pos}).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return tx.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).
+			Updates(map[string]any{"organise_status": StatusReady, "organise_error": ""}).Error
+	})
+	if err != nil {
+		slog.Error("save organised units", "course", courseID, "error", err)
+		s.db.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).
+			Updates(map[string]any{"organise_status": StatusFailed, "organise_error": "Could not save the units. Please try again."})
+	}
+}
+
+func (s *Service) deleteUnits(tx *gorm.DB, courseID int) error {
+	var ids []int
+	tx.Model(&Unit{}).Where("course_id = ?", courseID).Pluck("id", &ids)
+	if len(ids) == 0 {
+		return nil
+	}
+	if err := tx.Where("unit_id IN ?", ids).Delete(&UnitMaterial{}).Error; err != nil {
+		return err
+	}
+	if err := tx.Where("unit_id IN ?", ids).Delete(&UnitProgress{}).Error; err != nil {
+		return err
+	}
+	return tx.Where("id IN ?", ids).Delete(&Unit{}).Error
+}
+
+// ── units and progress (F1.5, F1.7) ──────────────────────────────────────
+
+func (s *Service) units(courseID int) []Unit {
+	var us []Unit
+	s.db.Where("course_id = ?", courseID).Order("position, id").Find(&us)
+	return us
+}
+
+// unitMaterials returns each unit's materials, in order.
+func (s *Service) unitMaterials(unitIDs []int) map[int][]Material {
+	out := map[int][]Material{}
+	if len(unitIDs) == 0 {
+		return out
+	}
+	var links []UnitMaterial
+	s.db.Where("unit_id IN ?", unitIDs).Order("unit_id, position").Find(&links)
+	var mids []int
+	for _, l := range links {
+		mids = append(mids, l.MaterialID)
+	}
+	var mats []Material
+	if len(mids) > 0 {
+		s.db.Where("id IN ?", mids).Find(&mats)
+	}
+	byID := map[int]Material{}
+	for _, m := range mats {
+		byID[m.ID] = m
+	}
+	for _, l := range links {
+		if m, ok := byID[l.MaterialID]; ok {
+			out[l.UnitID] = append(out[l.UnitID], m)
+		}
+	}
+	return out
+}
+
+// completedUnits is the set of unit IDs the user finished in a course.
+func (s *Service) completedUnits(userID, courseID int) map[int]bool {
+	var ids []int
+	s.db.Model(&UnitProgress{}).Where("user_id = ? AND course_id = ?", userID, courseID).Pluck("unit_id", &ids)
+	done := map[int]bool{}
+	for _, id := range ids {
+		done[id] = true
+	}
+	return done
+}
+
+// unlocked: unit 1 is open; each next unit opens when every earlier one is done.
+func unlocked(units []Unit, done map[int]bool) map[int]bool {
+	open := map[int]bool{}
+	sorted := append([]Unit(nil), units...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Position < sorted[j].Position })
+	allBefore := true
+	for _, u := range sorted {
+		if allBefore {
+			open[u.ID] = true
+		}
+		if !done[u.ID] {
+			allBefore = false
+		}
+	}
+	return open
+}
+
+func (s *Service) isEnrolled(userID, courseID int) bool {
+	var n int64
+	s.db.Model(&coursemodels.Enrollment{}).Where("user_id = ? AND course_id = ?", userID, courseID).Count(&n)
+	return n > 0
+}
+
+// Complete marks a unit done if it is open for the learner.
+func (s *Service) Complete(userID int, u *Unit) error {
+	units := s.units(u.CourseID)
+	if !unlocked(units, s.completedUnits(userID, u.CourseID))[u.ID] {
+		return errors.New("Finish the previous unit first.")
+	}
+	return s.db.Where(UnitProgress{UserID: userID, UnitID: u.ID}).
+		Attrs(UnitProgress{CourseID: u.CourseID, CompletedAt: time.Now()}).
+		FirstOrCreate(&UnitProgress{}).Error
+}

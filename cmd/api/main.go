@@ -18,6 +18,7 @@ import (
 	"focusflow-api/internal/course/controllers"
 	coursemodels "focusflow-api/internal/course/models"
 	courseroutes "focusflow-api/internal/course/routes"
+	"focusflow-api/internal/learn"
 	"focusflow-api/internal/material/handler"
 	"focusflow-api/internal/material/model"
 	"focusflow-api/internal/material/repository"
@@ -93,6 +94,7 @@ func main() {
 
 	auth.NewHandler(authSvc, cfg, mail).Routes(r)
 	courseroutes.CourseRoutes(r, gdb)
+	wireLearn(r, gdb, cfg)
 	wireMaterials(r, gdb, cfg)
 
 	srv := &http.Server{
@@ -125,7 +127,8 @@ func main() {
 // migrate creates or updates every table. GORM AutoMigrate only adds tables
 // and columns, never drops them.
 func migrate(gdb *gorm.DB) error {
-	all := append(auth.Models(),
+	all := append(auth.Models(), learn.Models()...)
+	all = append(all,
 		&coursemodels.Category{}, &coursemodels.Course{}, &coursemodels.Enrollment{}, &coursemodels.CourseInvitation{},
 		&model.CourseMaterial{}, &model.Takeaway{}, &model.LessonQuestion{}, &model.QuizAttempt{},
 		&model.QuizAnswer{}, &model.Reflection{}, &model.LessonTranscript{},
@@ -204,6 +207,31 @@ func wireMaterials(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 
 	materialroutes.SetupRoutes(r, searchHandler, courseMaterialHandler, takeawayHandler, quizHandler,
 		dashboardHandler, reflectionHandler, analyticsHandler)
+}
+
+// wireLearn sets up the course builder (FEATURES.md step 1).
+func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
+	ai := learn.NewClaudeAI(cfg.AnthropicAPIKey, cfg.AIDigestModel, cfg.AIOrganiseModel)
+	if os.Getenv("AI_PROVIDER") == "fake" {
+		if cfg.IsProduction() {
+			slog.Error("AI_PROVIDER=fake is not allowed in production")
+			os.Exit(1)
+		}
+		ai = learn.FakeAI{}
+		slog.Warn("using the fake AI provider (development only)")
+	} else if cfg.AnthropicAPIKey == "" {
+		slog.Warn("ANTHROPIC_API_KEY not set: material reading and AI organising are off")
+	}
+	limits := learn.Limits{
+		CoursesPerUser:        cfg.FreeCourseLimit,
+		MaterialsPerCourse:    cfg.FreeMaterialsLimit,
+		MaxFileBytes:          int64(cfg.MaxMaterialFileMB) << 20,
+		OrganiseRunsPerCourse: cfg.FreeOrganiseRuns,
+	}
+	svc := learn.NewService(gdb, ai, limits, 2)
+	controllers.CanCreateCourse = svc.CanCreateCourse
+	learn.NewHandler(svc).Routes(r)
+	svc.ResumePending()
 }
 
 func health(gdb *gorm.DB) gin.HandlerFunc {

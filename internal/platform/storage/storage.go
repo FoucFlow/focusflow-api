@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path"
@@ -71,6 +72,51 @@ func Upload(ctx context.Context, prefix, name string, data []byte, contentType s
 		return "", err
 	}
 	return PublicURL(key), nil
+}
+
+// UploadKey stores data under an exact key and returns its public URL.
+func UploadKey(ctx context.Context, key string, data []byte, contentType string) (string, error) {
+	if client == nil {
+		return "", fmt.Errorf("file storage is not configured")
+	}
+	_, err := client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket()), Key: aws.String(key),
+		Body: bytes.NewReader(data), ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		return "", err
+	}
+	return PublicURL(key), nil
+}
+
+// Get reads an object by key, up to maxBytes.
+func Get(ctx context.Context, key string, maxBytes int64) ([]byte, error) {
+	if client == nil {
+		return nil, fmt.Errorf("file storage is not configured")
+	}
+	out, err := client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(bucket()), Key: aws.String(key)})
+	if err != nil {
+		return nil, err
+	}
+	defer out.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(out.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("object is larger than %d bytes", maxBytes)
+	}
+	return data, nil
+}
+
+// DeleteKey removes an object by key.
+func DeleteKey(ctx context.Context, key string) {
+	if client == nil || key == "" {
+		return
+	}
+	if _, err := client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket()), Key: aws.String(key)}); err != nil {
+		slog.Warn("storage delete failed", "key", key, "error", err)
+	}
 }
 
 // Delete removes an object given its public URL; URLs outside the bucket are ignored.

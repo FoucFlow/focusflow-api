@@ -12,6 +12,9 @@ import (
 	"gorm.io/gorm"
 )
 
+// CanCreateCourse enforces the free-tier course limit; main wires the real check.
+var CanCreateCourse = func(userID int, isAdmin bool) (bool, string) { return true, "" }
+
 type CourseService struct {
 	DB *gorm.DB
 }
@@ -29,6 +32,11 @@ type CourseService struct {
 // @Router       /api/course [post]
 
 func (cc *CourseService) CreateCourse(c *gin.Context) {
+	// Free-tier course limit (checked before any upload work)
+	if ok, reason := CanCreateCourse(c.GetInt("user_id"), c.GetString("user_role") == "admin"); !ok {
+		c.JSON(403, gin.H{"error": reason, "message": reason})
+		return
+	}
 
 	// 1. Thumbnail is optional. When a file is supplied we upload it to S3;
 	// otherwise the course is created with an empty thumbnail and the
@@ -90,9 +98,11 @@ func (cc *CourseService) CreateCourse(c *gin.Context) {
 		CourseThumb:       fileURL, // S3 URL, passed-through URL, or empty
 		CourseCategoryId:  categoryID,
 		UserId:            userID,
-		CourseVisibility:  c.PostForm("course_visibility"),
+		CourseVisibility:  c.DefaultPostForm("course_visibility", "private"),
 		CourseDescription: c.PostForm("course_description"),
 		CourseProgress:    progress,
+		CourseLanguage:    c.DefaultPostForm("course_language", "en"),
+		CourseStatus:      "draft", // published through /api/learn/courses/:id/publish
 	}
 
 	// 5. Save to PostgreSQL (Supabase)

@@ -19,6 +19,16 @@ type Course struct {
 	CourseDescription string `json:"course_description" gorm:"column:course_description"`
 	CourseProgress    int    `json:"course_progress" gorm:"column:course_progress"`
 
+	// Course builder (FEATURES.md step 1)
+	CourseLanguage    string     `json:"course_language" gorm:"size:16;not null;default:en"`
+	CourseStatus      string     `json:"course_status" gorm:"size:16;not null;default:draft;index"` // draft | published
+	PublishedAt       *time.Time `json:"published_at"`
+	RightsConfirmedAt *time.Time `json:"rights_confirmed_at"`                                  // creator confirmed they may share the files
+	OrganiseStatus    string     `json:"organise_status" gorm:"size:16;not null;default:idle"` // idle | processing | ready | failed
+	OrganiseError     string     `json:"organise_error,omitempty" gorm:"type:text"`
+	OrganiseRuns      int        `json:"organise_runs" gorm:"not null;default:0"`
+	PriceRWF          int        `json:"price_rwf" gorm:"not null;default:0"` // always 0 during the free pilot
+
 	Enrollments     []Enrollment `json:"enrollments,omitempty" gorm:"-"`
 	EnrollmentCount int          `json:"enrollment_count" gorm:"-"`
 

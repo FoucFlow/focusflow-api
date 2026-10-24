@@ -50,6 +50,15 @@ type Config struct {
 	GeminiModel      string
 	GeminiGradeModel string
 
+	AnthropicAPIKey string
+	AIDigestModel   string // reading PDFs and slides (cheap, bulk)
+	AIOrganiseModel string // organising courses into units
+
+	FreeCourseLimit    int
+	FreeMaterialsLimit int
+	FreeOrganiseRuns   int
+	MaxMaterialFileMB  int
+
 	AdminEmail    string // seeded admin account (created only if missing)
 	AdminPassword string
 }
@@ -88,6 +97,15 @@ func Load() (*Config, error) {
 		GeminiAPIKey:     os.Getenv("GEMINI_API_KEY"),
 		GeminiModel:      os.Getenv("GEMINI_MODEL"),
 		GeminiGradeModel: os.Getenv("GEMINI_GRADE_MODEL"),
+
+		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
+		AIDigestModel:   get("AI_DIGEST_MODEL", "claude-haiku-5-5"),
+		AIOrganiseModel: get("AI_ORGANISE_MODEL", "claude-opus-5-5"),
+
+		FreeCourseLimit:    getInt("FREE_COURSE_LIMIT", 2),
+		FreeMaterialsLimit: getInt("FREE_MATERIALS_PER_COURSE", 15),
+		FreeOrganiseRuns:   getInt("FREE_ORGANISE_RUNS", 3),
+		MaxMaterialFileMB:  getInt("MAX_MATERIAL_FILE_MB", 20),
 
 		AdminEmail:    os.Getenv("ADMIN_EMAIL"),
 		AdminPassword: os.Getenv("ADMIN_PASSWORD"),
