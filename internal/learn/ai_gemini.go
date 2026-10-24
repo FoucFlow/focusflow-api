@@ -42,11 +42,11 @@ func NewGeminiVideoAI(ctx context.Context, apiKey, model string) (VideoAI, error
 	return &geminiVideoAI{client: client, model: model}, nil
 }
 
-const videoDigestPrompt = `Watch this video for a course builder. Return:
+const videoDigestPrompt = `Watch this ENTIRE video, from start to end, for a course builder. Return:
 - summary: 2 to 4 sentences on what the video teaches.
 - topics: the main topics.
 - key_points: the most important takeaways.
-- concepts: every distinct concept the video teaches (usually 3 to 15), in the order they appear. For each: a short name; a 1 to 3 sentence summary of how THIS video explains it; details: what the video actually says and shows about it, faithfully and specifically (definitions, steps, examples, code or formulas shown on screen, warnings), 80 to 300 words; and start_seconds: the moment (in seconds from the start) where the explanation of that concept begins.
+- concepts: EVERY distinct concept the video teaches, in the order they appear. There is no maximum: a short clip may have 3, a one-hour lecture 30 or more. Split broad topics into separate concepts a learner would study one at a time. For each: a short name; a 1 to 3 sentence summary of how THIS video explains it; details: what the video actually says and shows about it, faithfully and specifically (definitions, steps, worked examples, code or formulas shown on screen, warnings), 80 to 300 words, keeping the video's own examples; and start_seconds: the moment (in seconds from the start) where the explanation of that concept begins.
 Use only what is in the video; do not invent content. Write in the video's own language.`
 
 func videoDigestSchema() *genai.Schema {

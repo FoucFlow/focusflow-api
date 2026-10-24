@@ -27,5 +27,8 @@ func TestRealOrganise(t *testing.T) {
 	}}
 	out, usage, err := ai.Organise(context.Background(), in)
 	b, _ := json.MarshalIndent(out, "", "  ")
-	t.Logf("err=%v usage=%+v\n%s", err, usage, b)
+	t.Logf("err=%v usage=%+v", err, usage)
+	if f := os.Getenv("REAL_OUT"); f != "" {
+		_ = os.WriteFile(f, b, 0o600)
+	}
 }

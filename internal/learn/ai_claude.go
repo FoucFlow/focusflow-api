@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -54,37 +55,43 @@ func NewClaudeAI(apiKey, digestModel, organiseModel, enrichModel string) AI {
 	}
 }
 
-const digestSystem = `You read one study material (lecture notes, slides, or a video or web page description) for a course builder.
+const digestSystem = `You read one study material (lecture notes, a textbook chapter, slides, or a video or web page description) for a course builder. Read ALL of it, from the first page or slide to the last; do not stop early or sample.
 Return:
 - summary: 2 to 4 sentences on what the material covers.
-- topics: the main topics.
+- topics: the main topics, in order.
 - key_points: the most important takeaways.
-- concepts: every distinct concept the material teaches (usually 3 to 15), in the order they appear. For each:
-  - name: a short name.
+- concepts: EVERY distinct concept the material teaches, in the order it appears. There is no maximum: a few pages may have 3 concepts, a long chapter 40 or more. Split broad topics into separate concepts a learner would study one at a time. For each:
+  - name: a short, specific name.
   - summary: one or two sentences on how THIS material explains it.
-  - details: what the material actually says about it, faithfully and specifically: its definitions, steps, rules, formulas, worked examples, diagrams described in words, and any warnings or common mistakes it mentions (80 to 300 words). Keep the material's terminology. This is used to write accurate lessons, so do not generalise or add outside knowledge.
+  - details: what the material actually says about it, faithfully and specifically: its definitions, steps, rules, formulas, code, worked examples, diagrams described in words, and any warnings or common mistakes (80 to 300 words). Keep the material's terminology and copy its examples. This is used to write accurate lessons, so do not generalise or add outside knowledge.
   - pages: for a PDF, the page numbers where it is covered (1 = first page of the file); slides: for slides, the slide numbers (from the "Slide N:" labels). Leave the other list empty.
 Use only what is in the material; do not invent content. Write in the material's own language.`
 
-const organiseSystem = `You are an expert teacher turning a creator's study materials into a course for self-taught learners and students. You get each material's summary and the concepts found in it, each with what the material says about it ("details") and a reference key (M12 is a material, M12-C3 is concept 3 of material 12).
+const planSystem = `You are an expert teacher planning a course that a beginner can follow on their own, from a creator's study materials. You get every material's summary and ALL the concepts found in it (with what the material says, its "details") and a reference key (M12 is a material, M12-C3 is concept 3 of material 12).
 
-Build the course:
-- 3 to 10 units in a sensible learning order, from foundations to advanced; prerequisites come before the ideas that need them.
-- Each unit: a title, a short intro (2 to 4 sentences, Markdown) saying what the learner will be able to do after it, and its concepts in teaching order (usually 2 to 6).
-- Each concept gets a clear title, a one-sentence summary, and an explanation in Markdown (150 to 400 words) that breaks the idea down correctly, in this order, using bold labels:
-  **What it is**: a plain-language definition.
-  **How it works**: the idea step by step.
-  **Example**: a concrete example, taken from the materials whenever they have one.
-  **Watch out**: a common mistake or misconception.
-  **Check yourself**: one short question the learner can answer to test their understanding (no answer given).
-  Base every fact on the materials' details. Where they are thin, say less rather than guessing; never contradict them. Define every technical term the first time it appears.
-- sources: the reference keys where learners can check the concept. When the same concept appears in several materials (notes, slides, videos), merge it into one concept and list every source, so a learner can read it in the notes and watch it in the video. Add a related link (its M key) when its title or description clearly matches.
-- Cover every concept from the materials somewhere. Use only the reference keys given. Write in the course language.`
-
-const organiseFormat = `
+Plan the units:
+- First group concepts that belong together into topics, and merge duplicates: the same idea found in the notes, the slides and a video becomes ONE concept with all its sources.
+- YOU decide how many units the material needs. Each unit is one coherent topic a learner can finish in one sitting. Short notes may make 1 or 2 units; a full textbook or a long lecture series may make 15 or more. Do not pad thin material and do not cram a large one into a few units.
+- Order units so prerequisites come first, from foundations to advanced, and order the concepts inside each unit the same way.
+- Every concept from the materials must appear in exactly one unit. Do not drop any.
+- Each unit: a clear title, and an intro (2 to 4 sentences, Markdown) saying what the learner will understand and be able to do after it.
+- Each concept: a clear title and its sources: the reference keys where learners can check it (concept keys like M1-C2, or a whole material like M3 for a clearly related link).
+Use only the reference keys given. Write in the course language.
 
 Answer with ONLY a JSON object, no other text, in exactly this shape:
-{"units":[{"title":"...","intro":"...","concepts":[{"title":"...","explanation":"...","sources":["M1-C2","M3"]}]}]}`
+{"units":[{"title":"...","intro":"...","concepts":[{"title":"...","sources":["M1-C2","M3"]}]}]}`
+
+const writeSystem = `You are an expert teacher writing one unit of a course for beginners studying on their own. For each concept you get what the creator's materials say about it ("source excerpts"). Write an explanation a beginner understands on first reading, in Markdown, in this order, with these bold labels:
+**What it is**: a plain-language definition in one or two sentences, then the precise definition from the materials.
+**Think of it like this**: a short everyday analogy.
+**How it works**: the idea step by step, defining every technical term the first time it appears.
+**Example**: a concrete, worked example, shown step by step. Use the materials' own example whenever they have one; if they don't, write a simple one and add "(example added for clarity)".
+**Watch out**: a common mistake or misconception.
+**Check yourself**: one short question to test understanding (no answer given).
+Usually 200 to 450 words per concept. Base every fact on the source excerpts and never contradict them; where they are thin, keep it short rather than inventing facts. Build on the earlier concepts of the unit instead of repeating them. Write in the course language.
+
+Answer with ONLY a JSON object, no other text, in exactly this shape, with the concepts in the order given:
+{"concepts":[{"title":"...","explanation":"..."}]}`
 
 // validOutline rejects empty or skeleton answers.
 func validOutline(o Outline) error {
@@ -193,27 +200,135 @@ func (a *claudeAI) Digest(ctx context.Context, in DigestInput) (Digest, Usage, e
 	}
 
 	var d Digest
-	u, err := a.call(ctx, a.digestModel, digestSystem, blocks, digestSchema(), 16000, &d)
+	// Generous budget: long documents can have dozens of concepts (streamed above 16k)
+	u, err := a.call(ctx, a.digestModel, digestSystem, blocks, digestSchema(), 48000, &d)
 	return d, u, err
 }
 
+// Organise plans the units in one call, then writes each unit's explanations
+// in its own call (three at a time), from that unit's source excerpts only.
 func (a *claudeAI) Organise(ctx context.Context, in OrganiseInput) (Outline, Usage, error) {
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
+	total := Usage{Provider: "claude", Model: a.organiseModel}
 
 	materials, _ := json.Marshal(in.Materials)
-	prompt := fmt.Sprintf("Course title: %s\nCourse description: %s\nCourse language: %s\n\n<materials>\n%s\n</materials>\n\nBuild the course from these materials and concepts.",
+	prompt := fmt.Sprintf("Course title: %s\nCourse description: %s\nCourse language: %s\n\n<materials>\n%s\n</materials>\n\nPlan the units.",
 		in.CourseTitle, in.CourseDescription, in.Language, materials)
-
-	// Structured-output mode returned empty skeletons for this deeply nested
-	// shape, so the outline comes back as plain JSON text that we check here
-	var o Outline
-	u, err := a.call(ctx, a.organiseModel, organiseSystem+organiseFormat,
-		[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, nil, 64000, &o)
+	var plan Outline
+	u, err := a.call(ctx, a.organiseModel, planSystem,
+		[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, nil, 64000, &plan)
+	total.add(u)
 	if err == nil {
-		err = validOutline(o)
+		err = validPlan(plan)
 	}
-	return o, u, err
+	if err != nil {
+		return Outline{}, total, err
+	}
+
+	excerpts := excerptIndex(in)
+	var mu sync.Mutex
+	var firstErr error
+	sem := make(chan struct{}, 3)
+	var wg sync.WaitGroup
+	for i := range plan.Units {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			written, u, err := a.writeUnit(ctx, in, plan.Units[i], excerpts)
+			mu.Lock()
+			defer mu.Unlock()
+			total.add(u)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("unit %q: %w", plan.Units[i].Title, err)
+				}
+				return
+			}
+			plan.Units[i].Concepts = written
+		}(i)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return Outline{}, total, firstErr
+	}
+	return plan, total, validOutline(plan)
+}
+
+// writeUnit writes the explanations of one planned unit.
+func (a *claudeAI) writeUnit(ctx context.Context, in OrganiseInput, unit OutlineUnit, excerpts map[string]string) ([]OutlineConcept, Usage, error) {
+	type item struct {
+		Title    string   `json:"title"`
+		Excerpts []string `json:"source_excerpts"`
+	}
+	items := make([]item, len(unit.Concepts))
+	for i, c := range unit.Concepts {
+		it := item{Title: c.Title}
+		for _, ref := range c.Sources {
+			if e, ok := excerpts[strings.ToUpper(strings.TrimSpace(ref))]; ok {
+				it.Excerpts = append(it.Excerpts, e)
+			}
+		}
+		items[i] = it
+	}
+	body, _ := json.Marshal(items)
+	prompt := fmt.Sprintf("Course: %s\nCourse language: %s\nUnit: %s\nUnit intro: %s\n\n<concepts>\n%s\n</concepts>\n\nWrite the explanations.",
+		in.CourseTitle, in.Language, unit.Title, unit.Intro, body)
+	var out struct {
+		Concepts []OutlineConcept `json:"concepts"`
+	}
+	u, err := a.call(ctx, a.organiseModel, writeSystem,
+		[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, nil, 64000, &out)
+	if err != nil {
+		return nil, u, err
+	}
+	// Keep the plan's titles and sources; take explanations by position
+	written := make([]OutlineConcept, len(unit.Concepts))
+	for i, c := range unit.Concepts {
+		written[i] = c
+		if i < len(out.Concepts) {
+			written[i].Explanation = out.Concepts[i].Explanation
+		}
+	}
+	return written, u, nil
+}
+
+// excerptIndex maps every reference key to the text the writer should see.
+func excerptIndex(in OrganiseInput) map[string]string {
+	idx := map[string]string{}
+	for _, m := range in.Materials {
+		idx[strings.ToUpper(m.Ref)] = fmt.Sprintf("[%s] %s: %s", m.Kind, m.Title, m.Summary)
+		for _, c := range m.Concepts {
+			idx[strings.ToUpper(c.Ref)] = fmt.Sprintf("[%s: %s] %s. %s", m.Kind, m.Title, c.Name, strings.TrimSpace(c.Summary+" "+c.Details))
+		}
+	}
+	return idx
+}
+
+func (u *Usage) add(o Usage) {
+	u.InputTokens += o.InputTokens
+	u.OutputTokens += o.OutputTokens
+	u.CostMicroUSD += o.CostMicroUSD
+}
+
+// validPlan rejects empty or skeleton plans.
+func validPlan(o Outline) error {
+	if len(o.Units) == 0 {
+		return fmt.Errorf("the AI proposed no units")
+	}
+	n := 0
+	for _, u := range o.Units {
+		if strings.TrimSpace(u.Title) == "" || strings.Contains(u.Title, "placeholder") {
+			return fmt.Errorf("the AI returned an incomplete course plan")
+		}
+		n += len(u.Concepts)
+	}
+	if n == 0 {
+		return fmt.Errorf("the AI planned units without concepts")
+	}
+	return nil
 }
 
 // call sends one structured-output request and decodes the JSON into out.
