@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -79,6 +80,33 @@ Build the course:
   Base every fact on the materials' details. Where they are thin, say less rather than guessing; never contradict them. Define every technical term the first time it appears.
 - sources: the reference keys where learners can check the concept. When the same concept appears in several materials (notes, slides, videos), merge it into one concept and list every source, so a learner can read it in the notes and watch it in the video. Add a related link (its M key) when its title or description clearly matches.
 - Cover every concept from the materials somewhere. Use only the reference keys given. Write in the course language.`
+
+const organiseFormat = `
+
+Answer with ONLY a JSON object, no other text, in exactly this shape:
+{"units":[{"title":"...","intro":"...","concepts":[{"title":"...","explanation":"...","sources":["M1-C2","M3"]}]}]}`
+
+// validOutline rejects empty or skeleton answers.
+func validOutline(o Outline) error {
+	if len(o.Units) == 0 {
+		return fmt.Errorf("the AI proposed no units")
+	}
+	concepts := 0
+	for _, u := range o.Units {
+		if strings.TrimSpace(u.Title) == "" || strings.Contains(u.Title, "placeholder") {
+			return fmt.Errorf("the AI returned an incomplete course outline")
+		}
+		for _, c := range u.Concepts {
+			if strings.TrimSpace(c.Title) != "" && strings.TrimSpace(c.Explanation) != "" {
+				concepts++
+			}
+		}
+	}
+	if concepts == 0 {
+		return fmt.Errorf("the AI returned units without concepts")
+	}
+	return nil
+}
 
 const enrichSystem = `You help learners go beyond a course. For each concept you are given, use web search to find 2 or 3 high-quality, free resources that explain it well for a learner: official documentation, university course pages (for example MIT OpenCourseWare), Khan Academy, Wikipedia, well-known tutorial sites, or respected educational videos. Prefer resources in the course language; English is fine when nothing good exists in that language.
 Only use pages that appear in your search results. Never write a URL from memory.
@@ -177,9 +205,14 @@ func (a *claudeAI) Organise(ctx context.Context, in OrganiseInput) (Outline, Usa
 	prompt := fmt.Sprintf("Course title: %s\nCourse description: %s\nCourse language: %s\n\n<materials>\n%s\n</materials>\n\nBuild the course from these materials and concepts.",
 		in.CourseTitle, in.CourseDescription, in.Language, materials)
 
+	// Structured-output mode returned empty skeletons for this deeply nested
+	// shape, so the outline comes back as plain JSON text that we check here
 	var o Outline
-	u, err := a.call(ctx, a.organiseModel, organiseSystem,
-		[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, outlineSchema(), 64000, &o)
+	u, err := a.call(ctx, a.organiseModel, organiseSystem+organiseFormat,
+		[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, nil, 64000, &o)
+	if err == nil {
+		err = validOutline(o)
+	}
 	return o, u, err
 }
 
@@ -192,9 +225,9 @@ func (a *claudeAI) call(ctx context.Context, model, system string, blocks []anth
 		MaxTokens: maxTokens,
 		System:    []anthropic.BetaTextBlockParam{{Text: system}},
 		Messages:  []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(blocks...)},
-		OutputConfig: anthropic.BetaOutputConfigParam{
-			Format: anthropic.BetaJSONOutputFormatParam{Schema: schema},
-		},
+	}
+	if schema != nil {
+		params.OutputConfig.Format = anthropic.BetaJSONOutputFormatParam{Schema: schema}
 	}
 	if strings.HasPrefix(model, "claude-opus") || strings.HasPrefix(model, "claude-sonnet") {
 		// If a request is declined by a safety classifier, the API re-runs it
@@ -247,12 +280,23 @@ func (a *claudeAI) call(ctx context.Context, model, system string, blocks []anth
 		return u, fmt.Errorf("the AI response was cut off (too long); try fewer or smaller materials")
 	}
 	var text strings.Builder
+	var kinds []string
 	for _, b := range resp.Content {
+		kinds = append(kinds, b.Type)
 		if t, ok := b.AsAny().(anthropic.BetaTextBlock); ok {
 			text.WriteString(t.Text)
 		}
 	}
-	if err := json.Unmarshal([]byte(text.String()), out); err != nil {
+	raw := text.String()
+	if len(raw) > 1500 {
+		raw = raw[:1500]
+	}
+	slog.Debug("claude response", "model", resp.Model, "stop", resp.StopReason, "blocks", kinds, "text", raw)
+	body := text.String()
+	if schema == nil {
+		body = extractJSON(body)
+	}
+	if err := json.Unmarshal([]byte(body), out); err != nil {
 		return u, fmt.Errorf("the AI returned an unreadable answer: %w", err)
 	}
 	return u, nil
