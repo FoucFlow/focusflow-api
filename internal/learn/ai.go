@@ -207,6 +207,14 @@ func (FakeAI) FindReferences(_ context.Context, in EnrichInput) (map[int][]Refer
 	return out, Usage{Provider: "fake", Model: "fake"}, nil
 }
 
+// DigestVideoPart: two concepts, 30 s and 120 s into the part.
+func (FakeAI) DigestVideoPart(_ context.Context, _, title, _ string, p VideoPart) (Digest, Usage, error) {
+	a, b := p.From+30, p.From+120
+	return Digest{Summary: "Video digest of " + title, Topics: []string{title}, KeyPoints: []string{},
+		Concepts: []SourceConcept{{Name: fmt.Sprintf("%s idea at %d", title, a), Summary: "An idea", StartSeconds: &a},
+			{Name: fmt.Sprintf("%s idea at %d", title, b), Summary: "Another idea", StartSeconds: &b}}}, Usage{Provider: "fake", Model: "fake"}, nil
+}
+
 // DigestVideo: two concepts, at 0:30 and 2:00.
 func (FakeAI) DigestVideo(_ context.Context, _, title, _ string) (Digest, Usage, error) {
 	a, b := 30, 120

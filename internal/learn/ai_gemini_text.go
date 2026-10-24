@@ -92,6 +92,14 @@ func (g *geminiAI) generate(ctx context.Context, model, system string, parts []*
 	var err error
 	for attempt := 0; attempt < 4; attempt++ {
 		resp, err = g.client.Models.GenerateContent(ctx, model, []*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
+		if err != nil && noQuota(err) && model != g.digestModel {
+			// The key's plan has no quota at all for this model (the free tier
+			// allows no Pro models): use the reading model (Flash) instead
+			slog.Warn("gemini model not available on this plan, using fallback", "model", model, "fallback", g.digestModel)
+			model = g.digestModel
+			u.Model = model
+			resp, err = g.client.Models.GenerateContent(ctx, model, []*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
+		}
 		if err == nil || !retryableGemini(err) || ctx.Err() != nil {
 			break
 		}

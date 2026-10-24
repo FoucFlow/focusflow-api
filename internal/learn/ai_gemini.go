@@ -14,6 +14,35 @@ import (
 // Documents go to Claude; videos go to Gemini (FEATURES.md section 8).
 type VideoAI interface {
 	DigestVideo(ctx context.Context, youtubeID, title, note string) (Digest, Usage, error)
+	// DigestVideoPart watches only From..To (seconds) of a long video.
+	DigestVideoPart(ctx context.Context, youtubeID, title, note string, part VideoPart) (Digest, Usage, error)
+}
+
+// VideoPart is one stretch of a long video, and what earlier parts found.
+type VideoPart struct {
+	From, To, Total int      // seconds
+	Earlier         []string // concept names found in earlier parts
+}
+
+// videoPartPrompt tells the model which stretch to watch and what it saw before.
+func videoPartPrompt(p VideoPart) string {
+	s := fmt.Sprintf("This is one part of a long video: you are given only %s to %s of a %s video. Watch ALL of this part. "+
+		"Give start_seconds counted from the start of the WHOLE video (so between %d and %d).",
+		clock(p.From), clock(p.To), clock(p.Total), p.From, p.To)
+	if len(p.Earlier) > 0 {
+		names, _ := json.Marshal(p.Earlier)
+		s += "\nEarlier parts of this video already covered these concepts: " + string(names) +
+			". Continue from there: do not list them again, unless this part teaches something new about one of them (then name what is new)."
+	}
+	return s
+}
+
+// clock formats seconds as m:ss or h:mm:ss.
+func clock(sec int) string {
+	if sec >= 3600 {
+		return fmt.Sprintf("%d:%02d:%02d", sec/3600, sec%3600/60, sec%60)
+	}
+	return fmt.Sprintf("%d:%02d", sec/60, sec%60)
 }
 
 // Approximate prices in USD per million tokens (input, output), for the usage log.
@@ -73,6 +102,15 @@ func videoDigestSchema() *genai.Schema {
 }
 
 func (g *geminiVideoAI) DigestVideo(ctx context.Context, youtubeID, title, note string) (Digest, Usage, error) {
+	return g.watch(ctx, youtubeID, title, note, nil)
+}
+
+func (g *geminiVideoAI) DigestVideoPart(ctx context.Context, youtubeID, title, note string, part VideoPart) (Digest, Usage, error) {
+	return g.watch(ctx, youtubeID, title, note, &part)
+}
+
+// watch digests the whole video, or only part of it.
+func (g *geminiVideoAI) watch(ctx context.Context, youtubeID, title, note string, part *VideoPart) (Digest, Usage, error) {
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 	defer cancel()
 	u := Usage{Provider: "gemini", Model: g.model}
@@ -81,11 +119,13 @@ func (g *geminiVideoAI) DigestVideo(ctx context.Context, youtubeID, title, note 
 	if strings.TrimSpace(note) != "" {
 		intro += "\nCreator's note: " + note
 	}
-	parts := []*genai.Part{
-		genai.NewPartFromText(intro),
-		{FileData: &genai.FileData{FileURI: "https://www.youtube.com/watch?v=" + youtubeID, MIMEType: "video/*"}},
-		genai.NewPartFromText(videoDigestPrompt),
+	video := &genai.Part{FileData: &genai.FileData{FileURI: "https://www.youtube.com/watch?v=" + youtubeID, MIMEType: "video/*"}}
+	prompt := videoDigestPrompt
+	if part != nil {
+		video.VideoMetadata = &genai.VideoMetadata{StartOffset: time.Duration(part.From) * time.Second, EndOffset: time.Duration(part.To) * time.Second}
+		prompt = strings.Replace(prompt, "Watch this ENTIRE video, from start to end,", "Watch this part of the video,", 1) + "\n\n" + videoPartPrompt(*part)
 	}
+	parts := []*genai.Part{genai.NewPartFromText(intro), video, genai.NewPartFromText(prompt)}
 	cfg := &genai.GenerateContentConfig{
 		ResponseMIMEType: "application/json",
 		ResponseSchema:   videoDigestSchema(),
@@ -137,6 +177,13 @@ func (g *geminiVideoAI) DigestVideo(ctx context.Context, youtubeID, title, note 
 	d := Digest{Summary: out.Summary, Topics: out.Topics, KeyPoints: out.KeyPoints}
 	for _, c := range out.Concepts {
 		start := c.StartSeconds
+		if part != nil {
+			// Some answers count from the start of the clip: move them into the part
+			if start < part.From && part.From+start <= part.To {
+				start += part.From
+			}
+			start = min(max(start, part.From), part.To)
+		}
 		if start < 0 {
 			start = 0
 		}
@@ -145,7 +192,16 @@ func (g *geminiVideoAI) DigestVideo(ctx context.Context, youtubeID, title, note 
 	return d, u, nil
 }
 
+// noQuota: the plan allows this model no use at all ("limit: 0"); waiting won't help.
+func noQuota(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "429") && strings.Contains(s, "limit: 0")
+}
+
 func retryableGemini(err error) bool {
+	if noQuota(err) {
+		return false
+	}
 	s := err.Error()
 	for _, code := range []string{"429", "500", "502", "503", "504", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE"} {
 		if strings.Contains(s, code) {

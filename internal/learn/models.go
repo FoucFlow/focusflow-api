@@ -41,6 +41,9 @@ type Material struct {
 	TotalPages int  `json:"total_pages,omitempty"`
 	ReadPages  int  `json:"read_pages,omitempty"`
 	Reading    bool `json:"reading"`
+	// Long videos are watched in parts the same way (seconds)
+	TotalSeconds int `json:"total_seconds,omitempty"`
+	ReadSeconds  int `json:"read_seconds,omitempty"`
 	// Text extracted from slides (sent to the AI instead of the file). Never in API output.
 	Text      string    `json:"-" gorm:"type:text"`
 	CreatedAt time.Time `json:"created_at"`

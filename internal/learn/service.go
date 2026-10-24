@@ -33,19 +33,21 @@ type Limits struct {
 	QuestionRunsPerUnit   int     `json:"question_runs_per_unit"` // AI question pools per unit
 	TestsPerDay           int     `json:"tests_per_day"`          // test starts per learner per day (written answers cost AI)
 	PartPages             int     `json:"part_pages"`             // long PDFs are read this many pages at a time (0 = whole file)
+	VideoPartSeconds      int     `json:"video_part_seconds"`     // long videos are watched this long at a time (0 = whole video)
 }
 
-var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileBytes: 20 << 20, OrganiseRunsPerCourse: 3, QuestionRunsPerUnit: 3, TestsPerDay: 20, PartPages: 25}
+var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileBytes: 20 << 20, OrganiseRunsPerCourse: 3, QuestionRunsPerUnit: 3, TestsPerDay: 20, PartPages: 25, VideoPartSeconds: 600}
 
 type Service struct {
-	db      *gorm.DB
-	ai      AI
-	videoAI VideoAI  // nil: videos are described by their title and note only
-	refs    Enricher // nil: no "expand your knowledge" references
-	exam    Examiner // nil: no AI questions or marking
-	limits  Limits
-	appKey  []byte // signs upload tokens
-	jobs    chan func()
+	db          *gorm.DB
+	ai          AI
+	videoAI     VideoAI       // nil: videos are described by their title and note only
+	refs        Enricher      // nil: no "expand your knowledge" references
+	videoLength VideoDuration // nil: videos are watched in one piece
+	exam        Examiner      // nil: no AI questions or marking
+	limits      Limits
+	appKey      []byte // signs upload tokens
+	jobs        chan func()
 }
 
 // NewService starts `workers` background workers for AI jobs. AI calls never
@@ -107,6 +109,9 @@ const creditMessage = "FocusFlow's AI account has run out of credit, so this can
 
 // SetVideoAI turns on video reading (Gemini).
 func (s *Service) SetVideoAI(v VideoAI) { s.videoAI = v }
+
+// SetVideoDuration lets long videos be watched in parts.
+func (s *Service) SetVideoDuration(d VideoDuration) { s.videoLength = d }
 
 // SetEnricher turns on reference finding (web search).
 func (s *Service) SetEnricher(e Enricher) { s.refs = e }
@@ -361,16 +366,17 @@ func (s *Service) AddLink(c *coursemodels.Course, ownerID int, kind, title, url,
 	return m, nil
 }
 
-// partlyRead: a long PDF whose reading stopped before the end.
+// partlyRead: a long PDF or video whose reading stopped before the end.
 func partlyRead(m *Material) bool {
-	return m.Status == StatusReady && !m.Reading && m.ReadPages > 0 && m.ReadPages < m.TotalPages
+	return m.Status == StatusReady && !m.Reading &&
+		((m.ReadPages > 0 && m.ReadPages < m.TotalPages) || (m.ReadSeconds > 0 && m.ReadSeconds < m.TotalSeconds))
 }
 
 func (s *Service) Retry(m *Material) {
 	if partlyRead(m) {
 		s.db.Model(m).Updates(map[string]any{"reading": true, "error": ""})
 	} else {
-		s.db.Model(m).Updates(map[string]any{"status": StatusProcessing, "error": "", "read_pages": 0, "reading": false})
+		s.db.Model(m).Updates(map[string]any{"status": StatusProcessing, "error": "", "read_pages": 0, "read_seconds": 0, "reading": false})
 	}
 	id := m.ID
 	s.enqueue(func() { s.digest(id, nil) })
@@ -425,6 +431,20 @@ func (s *Service) digest(materialID int, data []byte) {
 	var usage Usage
 	var err error
 	task := "digest"
+	if m.Kind == KindVideo && s.videoAI != nil && s.videoLength != nil && s.limits.VideoPartSeconds > 0 {
+		total := m.TotalSeconds
+		if total == 0 {
+			if n, err := s.videoLength(ctx, m.YouTubeID); err != nil {
+				slog.Warn("video length", "material", m.ID, "error", err)
+			} else {
+				total = n
+			}
+		}
+		if total > s.limits.VideoPartSeconds+s.limits.VideoPartSeconds/2 {
+			s.digestVideoPart(&m, total)
+			return
+		}
+	}
 	if m.Kind == KindVideo {
 		task = "video_digest"
 		if s.videoAI == nil {
@@ -553,6 +573,66 @@ func (s *Service) digestPart(m *Material, data []byte, total int) bool {
 		s.enqueue(func() { s.digest(id, data) })
 	}
 	return true
+}
+
+// digestVideoPart watches the next stretch of a long video and adds what it
+// finds, telling the AI which concepts earlier parts already found.
+func (s *Service) digestVideoPart(m *Material, total int) {
+	from := m.ReadSeconds
+	to := from + s.limits.VideoPartSeconds
+	if total-to < s.limits.VideoPartSeconds/2 {
+		to = total // no tiny last part
+	}
+	first := from == 0
+	partFail := func(msg string) {
+		if first {
+			s.failMaterial(m, msg)
+			return
+		}
+		s.db.Model(m).Updates(map[string]any{"reading": false, "status": StatusReady,
+			"error": fmt.Sprintf("%s to %s of %s was not watched yet: %s", clock(from), clock(to), clock(total), msg)})
+	}
+	if err := s.checkBudget(); err != nil {
+		partFail(budgetMessage)
+		return
+	}
+	part := VideoPart{From: from, To: to, Total: total}
+	for _, c := range m.Digest.Concepts {
+		part.Earlier = append(part.Earlier, c.Name)
+	}
+	if n := len(part.Earlier); n > 80 {
+		part.Earlier = part.Earlier[n-80:] // the most recent ones matter most
+	}
+	started := time.Now()
+	d, usage, err := s.videoAI.DigestVideoPart(context.Background(), m.YouTubeID, m.Title, m.Text, part)
+	s.logUsage("video_digest", m.CourseID, m.OwnerID, usage, started, err)
+	if err != nil {
+		slog.Warn("video part failed", "material", m.ID, "from", from, "to", to, "error", err)
+		partFail(digestErrorMessage(KindVideo, err))
+		return
+	}
+	cleanDigest(&d, 0)
+	more := to < total
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		var cur Material
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&cur, m.ID).Error; err != nil {
+			return err
+		}
+		cur.Digest = mergeDigests(cur.Digest, d, first)
+		cur.Status, cur.Error, cur.TotalSeconds, cur.ReadSeconds, cur.Reading = StatusReady, "", total, to, more
+		*m = cur
+		return tx.Model(&cur).Select("status", "error", "digest", "total_seconds", "read_seconds", "reading").Updates(&cur).Error
+	})
+	if err != nil {
+		slog.Error("save video part", "material", m.ID, "error", err)
+		partFail("Could not save what the AI watched. Please retry.")
+		return
+	}
+	s.maybeExtend(m.CourseID)
+	if more {
+		id := m.ID
+		s.enqueue(func() { s.digest(id, nil) })
+	}
 }
 
 // mergeDigests adds a newly read part to what was read before.

@@ -222,6 +222,7 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		QuestionRunsPerUnit:   cfg.FreeQuestionRuns,
 		TestsPerDay:           cfg.TestsPerDay,
 		PartPages:             cfg.PDFPartPages,
+		VideoPartSeconds:      cfg.VideoPartMinutes * 60,
 		MonthlyBudgetUSD:      cfg.AIMonthlyBudgetUSD,
 	}
 	if cfg.AIMonthlyBudgetUSD > 0 {
@@ -242,10 +243,18 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 	// Videos: Gemini watches them (concepts with timestamps)
 	if fake, ok := ai.(learn.FakeAI); ok {
 		svc.SetVideoAI(fake)
+		if n := cfg.FakeVideoSeconds; n > 0 {
+			svc.SetVideoDuration(func(context.Context, string) (int, error) { return n, nil })
+		}
 	} else if video, err := learn.NewGeminiVideoAI(context.Background(), cfg.GeminiAPIKey, cfg.AIVideoModel); err != nil {
 		slog.Error("gemini video reader", "error", err)
 	} else if video != nil {
 		svc.SetVideoAI(video)
+		if cfg.YouTubeAPIKey != "" {
+			svc.SetVideoDuration(learn.YouTubeDuration(cfg.YouTubeAPIKey))
+		} else {
+			slog.Warn("YOUTUBE_API_KEY not set: long videos are watched in one piece")
+		}
 	} else {
 		slog.Warn("GEMINI_API_KEY not set: videos are linked by title only (no concepts or timestamps)")
 	}

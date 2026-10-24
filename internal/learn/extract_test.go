@@ -3,6 +3,7 @@ package learn
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -86,5 +87,28 @@ func TestSplitPDF(t *testing.T) {
 	}
 	if n := pdfPageCount(part); n != 2 {
 		t.Fatalf("pages 3-4 make a 2-page part, got %d", n)
+	}
+}
+
+func TestParseISODurationAndClock(t *testing.T) {
+	cases := map[string]int{"PT1H17M3S": 4623, "PT45S": 45, "PT10M": 600, "P1DT2H": 93600, "P0D": 0, "live": 0}
+	for in, want := range cases {
+		if got := parseISODuration(in); got != want {
+			t.Errorf("%s: want %d, got %d", in, want, got)
+		}
+	}
+	if clock(4623) != "1:17:03" || clock(605) != "10:05" {
+		t.Fatalf("clock: %s %s", clock(4623), clock(605))
+	}
+}
+
+func TestNoQuotaIsNotRetried(t *testing.T) {
+	free := errors.New("gemini: Error 429, Message: You exceeded your current quota... limit: 0, model: gemini-3.1-pro")
+	busy := errors.New("gemini: Error 429, RESOURCE_EXHAUSTED, limit: 15")
+	if !noQuota(free) || retryableGemini(free) {
+		t.Fatal("a model with no quota on the plan must not be retried")
+	}
+	if noQuota(busy) || !retryableGemini(busy) {
+		t.Fatal("a busy model is retried")
 	}
 }
