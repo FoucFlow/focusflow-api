@@ -35,6 +35,8 @@ type claudeAI struct {
 	digestModel   string // cheap bulk reading
 	organiseModel string // careful structuring and writing
 	enrichModel   string // web search for references
+	questionModel string // writing test questions
+	markModel     string // marking written answers (cheap)
 }
 
 // NewClaudeAI returns the Claude provider, or a disabled one without a key.
@@ -57,6 +59,18 @@ func NewClaudeAI(apiKey, digestModel, organiseModel, enrichModel string) AI {
 		digestModel:   digestModel,
 		organiseModel: organiseModel,
 		enrichModel:   enrichModel,
+		questionModel: "claude-sonnet-5-5",
+		markModel:     "claude-haiku-5-5",
+	}
+}
+
+// SetExamModels overrides the question-writing and marking models.
+func (a *claudeAI) SetExamModels(question, mark string) {
+	if question != "" {
+		a.questionModel = question
+	}
+	if mark != "" {
+		a.markModel = mark
 	}
 }
 
@@ -448,11 +462,7 @@ func (a *claudeAI) call(ctx context.Context, model, system string, blocks []anth
 	}
 	u := Usage{Provider: "claude", Model: model}
 	if err != nil {
-		var apiErr *anthropic.Error
-		if errors.As(err, &apiErr) {
-			return u, fmt.Errorf("claude %d: %s", apiErr.StatusCode, apiErr.Error())
-		}
-		return u, fmt.Errorf("claude: %w", err)
+		return u, claudeErr(err)
 	}
 	u.Model = string(resp.Model)
 	u.InputTokens = resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens
@@ -532,7 +542,7 @@ func (a *claudeAI) FindReferences(ctx context.Context, in EnrichInput) (map[int]
 		params.Messages = messages
 		resp, err := a.client.Beta.Messages.New(ctx, params)
 		if err != nil {
-			return nil, u, fmt.Errorf("claude: %w", err)
+			return nil, u, claudeErr(err)
 		}
 		u.InputTokens += resp.Usage.InputTokens + resp.Usage.CacheReadInputTokens + resp.Usage.CacheCreationInputTokens
 		u.OutputTokens += resp.Usage.OutputTokens
@@ -591,6 +601,18 @@ func (a *claudeAI) FindReferences(ctx context.Context, in EnrichInput) (map[int]
 		}
 	}
 	return refs, u, nil
+}
+
+// claudeErr labels API errors; an empty credit balance becomes ErrAICredit.
+func claudeErr(err error) error {
+	var apiErr *anthropic.Error
+	if !errors.As(err, &apiErr) {
+		return fmt.Errorf("claude: %w", err)
+	}
+	if strings.Contains(strings.ToLower(apiErr.Error()), "credit balance") {
+		return fmt.Errorf("%w (claude %d): %s", ErrAICredit, apiErr.StatusCode, apiErr.Error())
+	}
+	return fmt.Errorf("claude %d: %s", apiErr.StatusCode, apiErr.Error())
 }
 
 // extractJSON takes the JSON object out of a reply (fenced or bare).

@@ -25,6 +25,8 @@ type geminiAI struct {
 	digestModel   string // reading PDFs and slides
 	organiseModel string // planning units and writing lessons
 	enrichModel   string // references with Google Search
+	questionModel string // writing test questions
+	markModel     string // marking written answers
 	http          *http.Client
 }
 
@@ -55,6 +57,7 @@ func NewGeminiAI(ctx context.Context, apiKey, digestModel, organiseModel, enrich
 	}
 	return &geminiAI{
 		client: client, digestModel: digestModel, organiseModel: organiseModel, enrichModel: enrichModel,
+		questionModel: "gemini-2.5-pro", markModel: "gemini-2.5-flash",
 		http: &http.Client{
 			Timeout:   15 * time.Second,
 			Transport: publicOnlyTransport(),
@@ -62,6 +65,16 @@ func NewGeminiAI(ctx context.Context, apiKey, digestModel, organiseModel, enrich
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}, nil
+}
+
+// SetExamModels overrides the question-writing and marking models.
+func (g *geminiAI) SetExamModels(question, mark string) {
+	if question != "" {
+		g.questionModel = question
+	}
+	if mark != "" {
+		g.markModel = mark
+	}
 }
 
 // generate calls Gemini with backoff on 429/5xx and returns the text and usage.

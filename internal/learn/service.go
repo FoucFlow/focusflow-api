@@ -28,15 +28,18 @@ type Limits struct {
 	MaterialsPerCourse    int     `json:"materials_per_course"`
 	MaxFileBytes          int64   `json:"max_file_bytes"`
 	OrganiseRunsPerCourse int     `json:"organise_runs_per_course"`
+	QuestionRunsPerUnit   int     `json:"question_runs_per_unit"` // AI question pools per unit
+	TestsPerDay           int     `json:"tests_per_day"`          // test starts per learner per day (written answers cost AI)
 }
 
-var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileBytes: 20 << 20, OrganiseRunsPerCourse: 3}
+var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileBytes: 20 << 20, OrganiseRunsPerCourse: 3, QuestionRunsPerUnit: 3, TestsPerDay: 20}
 
 type Service struct {
 	db      *gorm.DB
 	ai      AI
 	videoAI VideoAI  // nil: videos are described by their title and note only
 	refs    Enricher // nil: no "expand your knowledge" references
+	exam    Examiner // nil: no AI questions or marking
 	limits  Limits
 	appKey  []byte // signs upload tokens
 	jobs    chan func()
@@ -86,6 +89,8 @@ func (s *Service) checkBudget() error {
 }
 
 const budgetMessage = "FocusFlow has reached its AI budget for this month, so new AI work is paused. Please try again later."
+
+const creditMessage = "FocusFlow's AI account has run out of credit, so this can't be done right now. The site admin needs to top it up; then press Retry."
 
 // SetVideoAI turns on video reading (Gemini).
 func (s *Service) SetVideoAI(v VideoAI) { s.videoAI = v }
@@ -179,8 +184,9 @@ func (s *Service) ResumePending() {
 		id, owner := *c.CourseId, c.UserId
 		s.enqueue(func() { s.findReferences(id, owner) })
 	}
-	if len(mats)+len(courses)+len(refCourses) > 0 {
-		slog.Info("resumed AI jobs", "materials", len(mats), "courses", len(courses))
+	tests := s.resumeTests()
+	if len(mats)+len(courses)+len(refCourses)+tests > 0 {
+		slog.Info("resumed AI jobs", "materials", len(mats), "courses", len(courses), "tests", tests)
 	}
 }
 
@@ -389,6 +395,8 @@ func (s *Service) digest(materialID int, data []byte) {
 		switch {
 		case errors.Is(err, ErrAIUnavailable):
 			msg = "AI reading is not switched on yet on this server."
+		case errors.Is(err, ErrAICredit):
+			msg = creditMessage
 		case m.Kind == KindVideo:
 			msg = "The AI could not watch this video (it may be private, age-restricted, too long, or the daily video limit was reached). Try again later."
 		}
@@ -473,6 +481,8 @@ func (s *Service) organise(courseID, ownerID int) {
 		msg := "The AI could not organise this course. Try again in a minute; this run was not counted."
 		if errors.Is(err, ErrAIUnavailable) {
 			msg = "AI organising is not switched on yet on this server."
+		} else if errors.Is(err, ErrAICredit) {
+			msg = creditMessage
 		}
 		// A failed run does not use up the creator's allowance
 		s.db.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).Updates(map[string]any{
@@ -603,6 +613,9 @@ func (s *Service) deleteUnits(tx *gorm.DB, courseID int) error {
 	if err := tx.Where("unit_id IN ?", ids).Delete(&UnitMaterial{}).Error; err != nil {
 		return err
 	}
+	if err := deleteTests(tx, ids); err != nil {
+		return err
+	}
 	if err := tx.Where("unit_id IN ?", ids).Delete(&Concept{}).Error; err != nil {
 		return err
 	}
@@ -687,6 +700,9 @@ func (s *Service) Complete(userID int, u *Unit) error {
 	units := s.units(u.CourseID)
 	if !unlocked(units, s.completedUnits(userID, u.CourseID))[u.ID] {
 		return errors.New("Finish the previous unit first.")
+	}
+	if s.activeTests([]int{u.ID})[u.ID] {
+		return errors.New("Pass the unit test to finish this unit.")
 	}
 	return s.db.Where(UnitProgress{UserID: userID, UnitID: u.ID}).
 		Attrs(UnitProgress{CourseID: u.CourseID, CompletedAt: time.Now()}).

@@ -219,6 +219,8 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		MaterialsPerCourse:    cfg.FreeMaterialsLimit,
 		MaxFileBytes:          int64(cfg.MaxMaterialFileMB) << 20,
 		OrganiseRunsPerCourse: cfg.FreeOrganiseRuns,
+		QuestionRunsPerUnit:   cfg.FreeQuestionRuns,
+		TestsPerDay:           cfg.TestsPerDay,
 		MonthlyBudgetUSD:      cfg.AIMonthlyBudgetUSD,
 	}
 	if cfg.AIMonthlyBudgetUSD > 0 {
@@ -228,6 +230,13 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 	// References by web search: whatever provider implements it
 	if e, ok := ai.(learn.Enricher); ok && provider != "none" {
 		svc.SetEnricher(e)
+	}
+	// Unit tests: question writing and marking, same provider
+	if e, ok := ai.(learn.Examiner); ok && provider != "none" {
+		if m, ok := ai.(interface{ SetExamModels(q, m string) }); ok {
+			m.SetExamModels(cfg.AIQuestionModel, cfg.AIMarkModel)
+		}
+		svc.SetExaminer(e)
 	}
 	// Videos: Gemini watches them (concepts with timestamps)
 	if fake, ok := ai.(learn.FakeAI); ok {
@@ -279,7 +288,19 @@ func chooseAI(cfg *config.Config) (learn.AI, string) {
 			slog.Warn("AI_PROVIDER=claude but ANTHROPIC_API_KEY is not set: material reading and AI organising are off")
 			return learn.NewClaudeAI("", "", "", ""), "none"
 		}
-		return learn.NewClaudeAI(cfg.AnthropicAPIKey, cfg.AIDigestModel, cfg.AIOrganiseModel, cfg.AIEnrichModel), "claude"
+		claude := learn.NewClaudeAI(cfg.AnthropicAPIKey, cfg.AIDigestModel, cfg.AIOrganiseModel, cfg.AIEnrichModel)
+		// When Claude's credit runs out, Gemini (default models) takes over
+		if g, err := learn.NewGeminiAI(context.Background(), cfg.GeminiAPIKey, "", "", ""); err == nil && g != nil {
+			if full, ok := claude.(interface {
+				learn.AI
+				learn.Enricher
+				learn.Examiner
+			}); ok {
+				slog.Info("Gemini is the backup AI when Claude is out of credit")
+				return learn.FallbackAI{Primary: full, Backup: g}, "claude"
+			}
+		}
+		return claude, "claude"
 	}
 	slog.Warn("no AI key set: material reading and AI organising are off")
 	return learn.NewClaudeAI("", "", "", ""), "none"

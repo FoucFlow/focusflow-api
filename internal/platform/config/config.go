@@ -55,6 +55,8 @@ type Config struct {
 	AIOrganiseModel string // organising courses into units
 	AIVideoModel    string // watching videos (Gemini)
 	AIEnrichModel   string // finding references with web search
+	AIQuestionModel string // writing unit test questions
+	AIMarkModel     string // marking written answers
 	AIProvider      string
 
 	AIMonthlyBudgetUSD float64
@@ -62,6 +64,8 @@ type Config struct {
 	FreeCourseLimit    int
 	FreeMaterialsLimit int
 	FreeOrganiseRuns   int
+	FreeQuestionRuns   int // AI question pools per unit
+	TestsPerDay        int // test starts per learner per day
 	MaxMaterialFileMB  int
 
 	AdminEmail    string // seeded admin account (created only if missing)
@@ -109,14 +113,18 @@ func Load() (*Config, error) {
 		AIOrganiseModel: os.Getenv("AI_ORGANISE_MODEL"),
 		AIVideoModel:    get("AI_VIDEO_MODEL", "gemini-2.5-flash"),
 		// Picking links needs less judgment than teaching: Sonnet is cheaper
-		AIEnrichModel: os.Getenv("AI_ENRICH_MODEL"), // empty = the provider's default
-		AIProvider:    os.Getenv("AI_PROVIDER"),     // claude | gemini | fake (empty: claude if its key is set, else gemini)
+		AIEnrichModel:   os.Getenv("AI_ENRICH_MODEL"), // empty = the provider's default
+		AIQuestionModel: os.Getenv("AI_QUESTION_MODEL"),
+		AIMarkModel:     os.Getenv("AI_MARK_MODEL"),
+		AIProvider:      os.Getenv("AI_PROVIDER"), // claude | gemini | fake (empty: claude if its key is set, else gemini)
 
 		AIMonthlyBudgetUSD: getFloat("AI_MONTHLY_BUDGET_USD", 0),
 
 		FreeCourseLimit:    getInt("FREE_COURSE_LIMIT", 2),
 		FreeMaterialsLimit: getInt("FREE_MATERIALS_PER_COURSE", 15),
 		FreeOrganiseRuns:   getInt("FREE_ORGANISE_RUNS", 3),
+		FreeQuestionRuns:   getInt("FREE_QUESTION_RUNS", 3),
+		TestsPerDay:        getInt("TESTS_PER_DAY", 20),
 		MaxMaterialFileMB:  getInt("MAX_MATERIAL_FILE_MB", 20),
 
 		AdminEmail:    os.Getenv("ADMIN_EMAIL"),

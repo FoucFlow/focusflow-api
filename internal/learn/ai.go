@@ -10,6 +10,70 @@ import (
 // ErrAIUnavailable means no AI provider is configured (no API key).
 var ErrAIUnavailable = errors.New("AI is not configured on this server")
 
+// ErrAICredit means the provider refused the call because the account's
+// credit is used up (a billing problem, not something a retry fixes).
+var ErrAICredit = errors.New("the AI account's credit is used up")
+
+// fullAI is a provider that does every course-builder task.
+type fullAI interface {
+	AI
+	Enricher
+	Examiner
+}
+
+// FallbackAI uses Primary, and Backup for any call Primary refuses because
+// its credit is used up (e.g. Claude out of credit → Gemini).
+type FallbackAI struct {
+	Primary, Backup fullAI
+}
+
+// SetExamModels applies to the primary (the backup keeps its own defaults).
+func (f FallbackAI) SetExamModels(question, mark string) {
+	if m, ok := f.Primary.(interface{ SetExamModels(q, m string) }); ok {
+		m.SetExamModels(question, mark)
+	}
+}
+
+func (f FallbackAI) Digest(ctx context.Context, in DigestInput) (Digest, Usage, error) {
+	d, u, err := f.Primary.Digest(ctx, in)
+	if errors.Is(err, ErrAICredit) {
+		return f.Backup.Digest(ctx, in)
+	}
+	return d, u, err
+}
+
+func (f FallbackAI) Organise(ctx context.Context, in OrganiseInput) (Outline, Usage, error) {
+	o, u, err := f.Primary.Organise(ctx, in)
+	if errors.Is(err, ErrAICredit) {
+		return f.Backup.Organise(ctx, in)
+	}
+	return o, u, err
+}
+
+func (f FallbackAI) FindReferences(ctx context.Context, in EnrichInput) (map[int][]Reference, Usage, error) {
+	r, u, err := f.Primary.FindReferences(ctx, in)
+	if errors.Is(err, ErrAICredit) {
+		return f.Backup.FindReferences(ctx, in)
+	}
+	return r, u, err
+}
+
+func (f FallbackAI) WriteQuestions(ctx context.Context, in QuestionsInput) ([]Question, Usage, error) {
+	q, u, err := f.Primary.WriteQuestions(ctx, in)
+	if errors.Is(err, ErrAICredit) {
+		return f.Backup.WriteQuestions(ctx, in)
+	}
+	return q, u, err
+}
+
+func (f FallbackAI) MarkAnswers(ctx context.Context, in MarkInput) (map[int]AIMark, Usage, error) {
+	m, u, err := f.Primary.MarkAnswers(ctx, in)
+	if errors.Is(err, ErrAICredit) {
+		return f.Backup.MarkAnswers(ctx, in)
+	}
+	return m, u, err
+}
+
 // AI is everything the course builder asks a model to do. Each task can use
 // a different provider/model; see FEATURES.md section 8.
 type AI interface {

@@ -376,6 +376,7 @@ type unitView struct {
 	Materials    []Material    `json:"materials,omitempty"`
 	Concepts     []conceptView `json:"concepts,omitempty"`
 	ConceptNames []string      `json:"concept_names,omitempty"` // learner outline
+	Test         *testSummary  `json:"test,omitempty"`
 }
 
 // GET /api/learn/courses/:id: the creator's builder view, or the learner's view.
@@ -401,9 +402,10 @@ func (h *Handler) GetCourse(c *gin.Context) {
 		h.s.db.Where("course_id = ?", id).Order("id").Find(&mats)
 		byUnit := h.s.unitMaterials(ids)
 		concepts := h.s.unitConcepts(ids)
+		tests := h.s.testSummaries(ids, true, me)
 		views := make([]unitView, len(units))
 		for i, u := range units {
-			views[i] = unitView{Unit: u, Materials: byUnit[u.ID], Concepts: concepts[u.ID]}
+			views[i] = unitView{Unit: u, Materials: byUnit[u.ID], Concepts: concepts[u.ID], Test: tests[u.ID]}
 		}
 		var learners int64
 		h.s.db.Model(&coursemodels.Enrollment{}).Where("course_id = ?", id).Count(&learners)
@@ -422,6 +424,7 @@ func (h *Handler) GetCourse(c *gin.Context) {
 	done := h.s.completedUnits(me, id)
 	open := unlocked(units, done)
 	concepts := h.s.unitConcepts(ids)
+	tests := h.s.testSummaries(ids, false, me)
 	views := make([]unitView, len(units))
 	for i, u := range units {
 		u.Body = "" // body only through GET /units/:uid
@@ -429,7 +432,7 @@ func (h *Handler) GetCourse(c *gin.Context) {
 		for _, cv := range concepts[u.ID] {
 			names = append(names, cv.Title)
 		}
-		views[i] = unitView{Unit: u, Locked: !enrolled || !open[u.ID], Completed: done[u.ID], ConceptNames: names}
+		views[i] = unitView{Unit: u, Locked: !enrolled || !open[u.ID], Completed: done[u.ID], ConceptNames: names, Test: tests[u.ID]}
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"role": "learner", "course": course, "units": views, "enrolled": enrolled,
@@ -535,6 +538,9 @@ func (h *Handler) DeleteUnit(c *gin.Context) {
 			return err
 		}
 		if err := tx.Where("unit_id = ?", u.ID).Delete(&UnitProgress{}).Error; err != nil {
+			return err
+		}
+		if err := deleteTests(tx, []int{u.ID}); err != nil {
 			return err
 		}
 		if err := tx.Where("unit_id = ?", u.ID).Delete(&Concept{}).Error; err != nil {
@@ -714,7 +720,9 @@ func (h *Handler) GetUnit(c *gin.Context) {
 	}
 	me := c.GetInt(auth.CtxUserID)
 	view := unitView{Unit: u, Materials: h.s.unitMaterials([]int{u.ID})[u.ID], Concepts: h.s.unitConcepts([]int{u.ID})[u.ID]}
-	if course.UserId == me || isAdmin(c) {
+	creator := course.UserId == me || isAdmin(c)
+	view.Test = h.s.testSummaries([]int{u.ID}, creator, me)[u.ID]
+	if creator {
 		c.JSON(http.StatusOK, gin.H{"data": view})
 		return
 	}
