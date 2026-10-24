@@ -2,6 +2,7 @@ package learn
 
 import (
 	"fmt"
+	"strings"
 	"net/url"
 	"testing"
 )
@@ -109,5 +110,16 @@ func TestExtractJSONAndURLMatching(t *testing.T) {
 	}
 	if normaliseURL("https://example.com/a?x=1") == normaliseURL("https://example.com/a?x=2") {
 		t.Error("different queries are different pages")
+	}
+}
+
+func TestSplitConcepts(t *testing.T) {
+	text := "### CONCEPT 1\n**What it is**: A.\n```python\nprint(\"hi \\\\ there\")\n```\n\n### CONCEPT 2\nB text\n## CONCEPT 3\nC\n### CONCEPT 9\nignored"
+	got := splitConcepts(text, 3)
+	if !strings.Contains(got[0], `print("hi \\ there")`) || got[1] != "B text" || got[2] != "C" {
+		t.Fatalf("split = %#v", got)
+	}
+	if missing := splitConcepts("### CONCEPT 1\nonly one", 2); missing[1] != "" {
+		t.Fatal("missing sections stay empty (then retried)")
 	}
 }

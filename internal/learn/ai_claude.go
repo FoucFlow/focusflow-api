@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -109,8 +111,7 @@ const writeSystem = `You are an expert teacher writing one unit of a course for 
 **Check yourself**: one short question to test understanding (no answer given).
 Usually 200 to 450 words per concept. Base every fact on the source excerpts and never contradict them; where they are thin, keep it short rather than inventing facts. Build on the earlier concepts of the unit instead of repeating them. Write in the course language.
 
-Answer with ONLY a JSON object, no other text, in exactly this shape, with the concepts in the order given:
-{"concepts":[{"title":"...","explanation":"..."}]}`
+Format: write the explanations in the order given, each starting on its own line with a marker "### CONCEPT <number>" (for example "### CONCEPT 1"), followed by the explanation in Markdown. Write nothing before the first marker and do not repeat the concept titles.`
 
 // validOutline rejects empty or skeleton answers.
 func validOutline(o Outline) error {
@@ -297,25 +298,55 @@ func (a *claudeAI) writeUnit(ctx context.Context, in OrganiseInput, unit Outline
 		items[i] = it
 	}
 	body, _ := json.Marshal(items)
-	prompt := fmt.Sprintf("Course: %s\nCourse language: %s\nUnit: %s\nUnit intro: %s\n\n<concepts>\n%s\n</concepts>\n\nWrite the explanations.",
-		in.CourseTitle, in.Language, unit.Title, unit.Intro, body)
-	var out struct {
-		Concepts []OutlineConcept `json:"concepts"`
+	prompt := fmt.Sprintf("Course: %s\nCourse language: %s\nUnit: %s\nUnit intro: %s\n\n<concepts>\n%s\n</concepts>\n\nWrite the explanations for these %d concepts.",
+		in.CourseTitle, in.Language, unit.Title, unit.Intro, body, len(items))
+
+	var total Usage
+	var lastErr error
+	// One retry: a single bad answer should not fail the whole course
+	for attempt := 0; attempt < 2; attempt++ {
+		text, u, err := a.text(ctx, a.organiseModel, writeSystem,
+			[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, 64000)
+		total.add(u)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		parts := splitConcepts(text, len(unit.Concepts))
+		filled := 0
+		written := make([]OutlineConcept, len(unit.Concepts))
+		for i, c := range unit.Concepts {
+			written[i] = c
+			written[i].Explanation = parts[i]
+			if strings.TrimSpace(parts[i]) != "" {
+				filled++
+			}
+		}
+		if filled == len(unit.Concepts) {
+			return written, total, nil
+		}
+		lastErr = fmt.Errorf("the AI wrote %d of %d explanations", filled, len(unit.Concepts))
 	}
-	u, err := a.call(ctx, a.organiseModel, writeSystem,
-		[]anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(prompt)}, nil, 64000, &out)
-	if err != nil {
-		return nil, u, err
-	}
-	// Keep the plan's titles and sources; take explanations by position
-	written := make([]OutlineConcept, len(unit.Concepts))
-	for i, c := range unit.Concepts {
-		written[i] = c
-		if i < len(out.Concepts) {
-			written[i].Explanation = out.Concepts[i].Explanation
+	return nil, total, lastErr
+}
+
+var conceptMarker = regexp.MustCompile(`(?m)^#{2,4}\s*CONCEPT\s+(\d+)\s*$`)
+
+// splitConcepts cuts "### CONCEPT n" sections into n explanations (by number).
+func splitConcepts(text string, n int) []string {
+	out := make([]string, n)
+	locs := conceptMarker.FindAllStringSubmatchIndex(text, -1)
+	for i, loc := range locs {
+		num, _ := strconv.Atoi(text[loc[2]:loc[3]])
+		end := len(text)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		if num >= 1 && num <= n && out[num-1] == "" {
+			out[num-1] = strings.TrimSpace(text[loc[1]:end])
 		}
 	}
-	return written, u, nil
+	return out
 }
 
 // excerptIndex maps every reference key to the text the writer should see.
@@ -352,6 +383,13 @@ func validPlan(o Outline) error {
 		return fmt.Errorf("the AI planned units without concepts")
 	}
 	return nil
+}
+
+// text sends one request and returns the answer's text.
+func (a *claudeAI) text(ctx context.Context, model, system string, blocks []anthropic.BetaContentBlockParamUnion, maxTokens int64) (string, Usage, error) {
+	var out string
+	u, err := a.call(ctx, model, system, blocks, nil, maxTokens, &out)
+	return out, u, err
 }
 
 // call sends one structured-output request and decodes the JSON into out.
@@ -431,6 +469,10 @@ func (a *claudeAI) call(ctx context.Context, model, system string, blocks []anth
 	}
 	slog.Debug("claude response", "model", resp.Model, "stop", resp.StopReason, "blocks", kinds, "text", raw)
 	body := text.String()
+	if sp, ok := out.(*string); ok {
+		*sp = body
+		return u, nil
+	}
 	if schema == nil {
 		body = extractJSON(body)
 	}
