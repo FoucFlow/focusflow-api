@@ -124,6 +124,17 @@ func (s *Service) resumePaused() {
 			slog.Info("organise still waiting", "course", *waiting[i].CourseId, "reason", err.Error())
 		}
 	}
+	// Reference searches that stopped because the AI was busy (only the
+	// concepts without references are searched again)
+	var refsWaiting []coursemodels.Course
+	s.db.Where("references_waiting AND references_status = ?", StatusFailed).Limit(20).Find(&refsWaiting)
+	for i := range refsWaiting {
+		c := &refsWaiting[i]
+		s.db.Model(&coursemodels.Course{}).Where("course_id = ?", *c.CourseId).Update("references_waiting", false)
+		if err := s.startReferences(c, true); err != nil {
+			slog.Info("references still waiting", "course", *c.CourseId, "reason", err.Error())
+		}
+	}
 	// Courses with some units, the rest still to write
 	var partial []coursemodels.Course
 	s.db.Where("organise_status = ? AND organise_error = ?", StatusReady, partialMessage).Limit(20).Find(&partial)

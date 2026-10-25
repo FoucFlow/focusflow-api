@@ -32,6 +32,7 @@ type Course struct {
 	OrganiseTotal     int        `json:"organise_total"`  // units planned (0 while planning)
 	ReferencesDone    int        `json:"references_done"` // units searched so far
 	ReferencesTotal   int        `json:"references_total"`
+	ReferencesWaiting bool       `json:"references_waiting"`                                     // the search stopped because the AI was busy; it goes on later
 	ReferencesStatus  string     `json:"references_status" gorm:"size:16;not null;default:idle"` // idle | processing | ready | failed
 	PriceRWF          int        `json:"price_rwf" gorm:"not null;default:0"`                    // always 0 during the free pilot
 

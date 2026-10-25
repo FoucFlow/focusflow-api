@@ -170,7 +170,7 @@ func (s *Service) findReferences(courseID, ownerID int, onlyMissing bool) {
 	if err != nil {
 		return
 	}
-	failed := 0
+	failed, busy := 0, false
 	units := s.units(courseID)
 	progress := func(done int) {
 		s.db.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).
@@ -214,6 +214,10 @@ func (s *Service) findReferences(courseID, ownerID int, onlyMissing bool) {
 		if err != nil {
 			slog.Warn("find references failed", "course", courseID, "unit", u.ID, "error", err)
 			failed++
+			if errors.Is(err, ErrAllKeysResting) {
+				busy = true
+				break // the other units would fail too; resumePaused goes on later
+			}
 			continue
 		}
 		for i := range concepts {
@@ -227,7 +231,8 @@ func (s *Service) findReferences(courseID, ownerID int, onlyMissing bool) {
 	if failed > 0 {
 		status = StatusFailed
 	}
-	s.db.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).Update("references_status", status)
+	s.db.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).
+		Updates(map[string]any{"references_status": status, "references_waiting": busy})
 }
 
 // ResumePending re-queues work that was interrupted by a restart.
