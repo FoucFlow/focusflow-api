@@ -45,7 +45,7 @@ func (a *claudeAI) SetRecorder(r CallRecorder) { a.record = r }
 
 func (a *claudeAI) recordCall(model string, in, out int64, err error) {
 	if a.record != nil {
-		a.record("claude", model, in, out, err)
+		a.record("claude", model, "", in, out, err)
 	}
 }
 

@@ -221,6 +221,7 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		OrganiseRunsPerCourse: cfg.FreeOrganiseRuns,
 		QuestionRunsPerUnit:   cfg.FreeQuestionRuns,
 		TestsPerDay:           cfg.TestsPerDay,
+		NewCoursesPerDay:      cfg.NewCoursesPerDay,
 		PartPages:             cfg.PDFPartPages,
 		VideoPartSeconds:      cfg.VideoPartMinutes * 60,
 		FirstPartPages:        cfg.PDFFirstPages,
@@ -250,7 +251,7 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		if n := cfg.FakeVideoSeconds; n > 0 {
 			svc.SetVideoDuration(func(context.Context, string) (int, error) { return n, nil })
 		}
-	} else if video, err := learn.NewGeminiVideoAI(context.Background(), cfg.GeminiAPIKey, cfg.AIVideoModel); err != nil {
+	} else if video, err := learn.NewGeminiVideoAI(context.Background(), cfg.GeminiAPIKeys, cfg.AIVideoModel); err != nil {
 		slog.Error("gemini video reader", "error", err)
 	} else if video != nil {
 		svc.SetVideoAI(video)
@@ -297,7 +298,7 @@ func chooseAI(cfg *config.Config) (learn.AI, string) {
 		slog.Warn("using the fake AI provider (development only)")
 		return learn.FakeAI{}, "fake"
 	case "gemini":
-		g, err := learn.NewGeminiAI(context.Background(), cfg.GeminiAPIKey, cfg.AIDigestModel, cfg.AIOrganiseModel, cfg.AIEnrichModel)
+		g, err := learn.NewGeminiAI(context.Background(), cfg.GeminiAPIKeys, cfg.AIDigestModel, cfg.AIOrganiseModel, cfg.AIEnrichModel)
 		if err != nil || g == nil {
 			slog.Error("AI_PROVIDER=gemini but Gemini is not usable (GEMINI_API_KEY?)", "error", err)
 			return learn.NewClaudeAI("", "", "", ""), "none"
@@ -310,7 +311,7 @@ func chooseAI(cfg *config.Config) (learn.AI, string) {
 		}
 		claude := learn.NewClaudeAI(cfg.AnthropicAPIKey, cfg.AIDigestModel, cfg.AIOrganiseModel, cfg.AIEnrichModel)
 		// When Claude's credit runs out, Gemini (default models) takes over
-		if g, err := learn.NewGeminiAI(context.Background(), cfg.GeminiAPIKey, "", "", ""); err == nil && g != nil {
+		if g, err := learn.NewGeminiAI(context.Background(), cfg.GeminiAPIKeys, "", "", ""); err == nil && g != nil {
 			if full, ok := claude.(interface {
 				learn.AI
 				learn.Enricher

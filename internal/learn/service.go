@@ -34,6 +34,7 @@ type Limits struct {
 	OrganiseRunsPerCourse int     `json:"organise_runs_per_course"`
 	QuestionRunsPerUnit   int     `json:"question_runs_per_unit"` // AI question pools per unit
 	TestsPerDay           int     `json:"tests_per_day"`          // test starts per learner per day (written answers cost AI)
+	NewCoursesPerDay      int     `json:"new_courses_per_day"`    // courses a creator may start per day (UTC), with the AI allowance
 	PartPages             int     `json:"part_pages"`             // long PDFs are read this many pages at a time (0 = whole file)
 	VideoPartSeconds      int     `json:"video_part_seconds"`     // long videos are watched this long at a time (0 = whole video)
 	// The first part is short, so units can be made from it quickly
@@ -299,6 +300,15 @@ func (s *Service) CanCreateCourse(userID int, isAdmin bool) (bool, string) {
 	s.db.Model(&coursemodels.Course{}).Where("user_id = ?", userID).Count(&n)
 	if int(n) >= s.limits.CoursesPerUser {
 		return false, fmt.Sprintf("The free plan includes %d courses. Delete one to create another.", s.limits.CoursesPerUser)
+	}
+	if lim := s.limits.NewCoursesPerDay; lim > 0 {
+		day, next, _, _ := allowanceWindows(time.Now())
+		var today int64
+		s.db.Model(&coursemodels.Course{}).Where("user_id = ? AND created_at >= ?", userID, day).Count(&today)
+		if int(today) >= lim {
+			return false, "You can start one new course a day, so the AI has time to build it. Your next course can be started in " +
+				untilText(time.Until(next)) + ", when your AI allowance refills."
+		}
 	}
 	return true, ""
 }
@@ -787,8 +797,12 @@ func (s *Service) organise(courseID, ownerID int) {
 		if err := saveUnits(tx, courseID, 0, outline, refs); err != nil {
 			return err
 		}
-		return tx.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).
-			Updates(map[string]any{"organise_status": StatusReady, "organise_error": ""}).Error
+		done := map[string]any{"organise_status": StatusReady, "organise_error": ""}
+		if s.refs != nil {
+			// References start in the same step, so the course never looks finished in between
+			done["references_status"], done["references_done"], done["references_total"] = StatusProcessing, 0, 0
+		}
+		return tx.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).Updates(done).Error
 	})
 	if err != nil {
 		slog.Error("save organised units", "course", courseID, "error", err)
@@ -799,7 +813,7 @@ func (s *Service) organise(courseID, ownerID int) {
 	s.markOrganised(taken)
 	// New units: look for "expand your knowledge" references in the background
 	if s.refs != nil {
-		_ = s.StartReferences(c)
+		s.enqueue(func() { s.findReferences(courseID, ownerID, false) })
 	}
 	// Pages read while organising get units of their own
 	s.maybeExtend(courseID)

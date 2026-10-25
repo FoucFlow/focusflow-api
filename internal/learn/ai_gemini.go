@@ -52,7 +52,7 @@ var geminiPrices = map[string][2]float64{
 }
 
 type geminiVideoAI struct {
-	client *genai.Client
+	pool   *geminiPool
 	model  string
 	record CallRecorder
 }
@@ -61,18 +61,15 @@ type geminiVideoAI struct {
 func (g *geminiVideoAI) SetRecorder(r CallRecorder) { g.record = r }
 
 // NewGeminiVideoAI returns nil without a key (videos then use title and note only).
-func NewGeminiVideoAI(ctx context.Context, apiKey, model string) (VideoAI, error) {
-	if apiKey == "" {
-		return nil, nil
+func NewGeminiVideoAI(ctx context.Context, keys []string, model string) (VideoAI, error) {
+	pool, err := geminiPoolFor(ctx, keys)
+	if err != nil || pool == nil {
+		return nil, err
 	}
 	if model == "" {
 		model = "gemini-2.5-flash"
 	}
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: apiKey, Backend: genai.BackendGeminiAPI})
-	if err != nil {
-		return nil, fmt.Errorf("gemini client: %w", err)
-	}
-	return &geminiVideoAI{client: client, model: model}, nil
+	return &geminiVideoAI{pool: pool, model: model}, nil
 }
 
 const videoDigestPrompt = `Watch this ENTIRE video, from start to end, for a course builder. Return:
@@ -146,15 +143,13 @@ func (g *geminiVideoAI) watch(ctx context.Context, youtubeID, title, note string
 	var err error
 	// Gemini's free tier often answers 429/503 under load: back off and retry
 	for attempt := 0; attempt < 4; attempt++ {
-		resp, err = g.client.Models.GenerateContent(ctx, g.model,
-			[]*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
-		if g.record != nil {
-			var in, out int64
-			if err == nil && resp.UsageMetadata != nil {
-				in, out = int64(resp.UsageMetadata.PromptTokenCount), int64(resp.UsageMetadata.CandidatesTokenCount+resp.UsageMetadata.ThoughtsTokenCount)
-			}
-			g.record("gemini", g.model, in, out, err)
-		}
+		err = g.pool.do(g.model, func(k *poolKey) error {
+			var err error
+			resp, err = k.client.Models.GenerateContent(ctx, g.model,
+				[]*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
+			recordGemini(g.record, k, g.model, resp, err)
+			return err
+		})
 		if err == nil || !retryableGemini(err) || ctx.Err() != nil {
 			break
 		}
@@ -214,8 +209,14 @@ func noQuota(err error) bool {
 	return strings.Contains(s, "429") && strings.Contains(s, "limit: 0")
 }
 
+// dailyQuota: a daily limit was hit (on every key): waiting minutes won't help.
+func dailyQuota(err error) bool {
+	s := err.Error()
+	return strings.Contains(strings.ToLower(s), "per day") || strings.Contains(s, "PerDay")
+}
+
 func retryableGemini(err error) bool {
-	if noQuota(err) {
+	if noQuota(err) || dailyQuota(err) {
 		return false
 	}
 	s := err.Error()

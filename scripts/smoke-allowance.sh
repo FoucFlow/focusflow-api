@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Each creator's AI allowance, against an API with AI_PROVIDER=fake (every
-# fake call costs $0.001) and AI_USER_DAILY_USD=0.004, on an EMPTY database.
+# fake call costs $0.001) and AI_USER_DAILY_USD=0.004 (NEW_COURSES_PER_DAY=1, the default), on an EMPTY database.
 #   BASE=http://localhost:18091 scripts/smoke-allowance.sh
 set -u
 B=${BASE:-http://localhost:8091}
@@ -36,6 +36,8 @@ check "  0% used today and this month" "(lambda a: a['can_use_ai'] and not a['un
 
 t "alice creates a course" 201 "${A[@]}" -F course_title="Allowance" -F course_description="x" -F course_category_id=1 $B/api/course
 CID=$(py "d['course_id']")
+t "a second course today is refused" 403 "${A[@]}" -F course_title="Another" -F course_description="x" -F course_category_id=1 $B/api/course
+check "  says one new course a day, and when" "'one new course a day' in json.dumps(d) and 'refills' in json.dumps(d)"
 t "upload PDF 1" 201 "${A[@]}" -F "file=@$D/notes.pdf" -F title="A" $B/api/learn/courses/$CID/materials
 wait_built $CID
 check "  organised by itself: units, progress 100%" "len(d['data']['units'])>=1 and d['data']['progress']['stage']=='ready' and d['data']['progress']['percent']==100 and d['data']['course']['organise_runs']==1"

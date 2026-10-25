@@ -21,7 +21,7 @@ import (
 // instructions as the Claude version: read documents, plan units, write each
 // unit, and find references (Google Search). AI_PROVIDER=gemini.
 type geminiAI struct {
-	client        *genai.Client
+	pool          *geminiPool
 	digestModel   string // reading PDFs and slides
 	organiseModel string // planning units and writing lessons
 	enrichModel   string // references with Google Search
@@ -39,14 +39,12 @@ func init() {
 // inlineLimit: larger PDFs go through the Files API (requests cap at ~20 MB).
 const inlineLimit = 14 << 20
 
-// NewGeminiAI returns the Gemini provider (nil without a key).
-func NewGeminiAI(ctx context.Context, apiKey, digestModel, organiseModel, enrichModel string) (*geminiAI, error) {
-	if apiKey == "" {
-		return nil, nil
-	}
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: apiKey, Backend: genai.BackendGeminiAPI})
-	if err != nil {
-		return nil, fmt.Errorf("gemini client: %w", err)
+// NewGeminiAI returns the Gemini provider (nil without a key). Several keys
+// take turns (gemini_pool.go).
+func NewGeminiAI(ctx context.Context, keys []string, digestModel, organiseModel, enrichModel string) (*geminiAI, error) {
+	pool, err := geminiPoolFor(ctx, keys)
+	if err != nil || pool == nil {
+		return nil, err
 	}
 	if digestModel == "" {
 		digestModel = "gemini-2.5-flash"
@@ -58,7 +56,7 @@ func NewGeminiAI(ctx context.Context, apiKey, digestModel, organiseModel, enrich
 		enrichModel = "gemini-2.5-flash"
 	}
 	return &geminiAI{
-		client: client, digestModel: digestModel, organiseModel: organiseModel, enrichModel: enrichModel,
+		pool: pool, digestModel: digestModel, organiseModel: organiseModel, enrichModel: enrichModel,
 		questionModel: "gemini-3.1-pro-preview", markModel: "gemini-2.5-flash",
 		http: &http.Client{
 			Timeout:   15 * time.Second,
@@ -72,17 +70,38 @@ func NewGeminiAI(ctx context.Context, apiKey, digestModel, organiseModel, enrich
 // SetRecorder logs every request (for quota tracking).
 func (g *geminiAI) SetRecorder(r CallRecorder) { g.record = r }
 
-// call sends one request and records it.
-func (g *geminiAI) call(ctx context.Context, model string, parts []*genai.Part, cfg *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
-	resp, err := g.client.Models.GenerateContent(ctx, model, []*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
-	if g.record != nil {
-		var in, out int64
-		if err == nil && resp.UsageMetadata != nil {
-			in, out = int64(resp.UsageMetadata.PromptTokenCount), int64(resp.UsageMetadata.CandidatesTokenCount+resp.UsageMetadata.ThoughtsTokenCount)
+// partsFor builds a request's parts for one key (a large PDF is uploaded to
+// that key's project).
+type partsFor func(ctx context.Context, k *poolKey) ([]*genai.Part, error)
+
+func fixedParts(parts []*genai.Part) partsFor {
+	return func(context.Context, *poolKey) ([]*genai.Part, error) { return parts, nil }
+}
+
+// call sends one request with the first key not over its quota, recording each try.
+func (g *geminiAI) call(ctx context.Context, model string, parts partsFor, cfg *genai.GenerateContentConfig) (*genai.GenerateContentResponse, error) {
+	var resp *genai.GenerateContentResponse
+	err := g.pool.do(model, func(k *poolKey) error {
+		ps, err := parts(ctx, k)
+		if err != nil {
+			return err
 		}
-		g.record("gemini", model, in, out, err)
-	}
+		resp, err = k.client.Models.GenerateContent(ctx, model, []*genai.Content{genai.NewContentFromParts(ps, genai.RoleUser)}, cfg)
+		recordGemini(g.record, k, model, resp, err)
+		return err
+	})
 	return resp, err
+}
+
+func recordGemini(record CallRecorder, k *poolKey, model string, resp *genai.GenerateContentResponse, err error) {
+	if record == nil {
+		return
+	}
+	var in, out int64
+	if err == nil && resp.UsageMetadata != nil {
+		in, out = int64(resp.UsageMetadata.PromptTokenCount), int64(resp.UsageMetadata.CandidatesTokenCount+resp.UsageMetadata.ThoughtsTokenCount)
+	}
+	record("gemini", model, k.name, in, out, err)
 }
 
 // SetExamModels overrides the question-writing and marking models.
@@ -97,6 +116,10 @@ func (g *geminiAI) SetExamModels(question, mark string) {
 
 // generate calls Gemini with backoff on 429/5xx and returns the text and usage.
 func (g *geminiAI) generate(ctx context.Context, model, system string, parts []*genai.Part, cfg *genai.GenerateContentConfig) (*genai.GenerateContentResponse, string, Usage, error) {
+	return g.generateWith(ctx, model, system, fixedParts(parts), cfg)
+}
+
+func (g *geminiAI) generateWith(ctx context.Context, model, system string, parts partsFor, cfg *genai.GenerateContentConfig) (*genai.GenerateContentResponse, string, Usage, error) {
 	u := Usage{Provider: "gemini", Model: model}
 	if cfg == nil {
 		cfg = &genai.GenerateContentConfig{}
@@ -147,25 +170,36 @@ func (g *geminiAI) Digest(ctx context.Context, in DigestInput) (Digest, Usage, e
 	ctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 	defer cancel()
 
-	var parts []*genai.Part
+	var parts partsFor
 	if in.Kind == KindPDF && len(in.PDF) > 0 {
 		if len(in.PDF) <= inlineLimit {
-			parts = append(parts, genai.NewPartFromBytes(in.PDF, "application/pdf"))
+			parts = fixedParts([]*genai.Part{genai.NewPartFromBytes(in.PDF, "application/pdf"), genai.NewPartFromText(pdfPrompt(in))})
 		} else {
-			f, err := g.client.Files.Upload(ctx, bytes.NewReader(in.PDF), &genai.UploadFileConfig{MIMEType: "application/pdf", DisplayName: "material.pdf"})
-			if err != nil {
-				return Digest{}, Usage{Provider: "gemini", Model: g.digestModel}, fmt.Errorf("gemini file upload: %w", err)
+			// Uploaded files belong to one key's project: upload to each key used
+			uploaded := map[*poolKey]string{}
+			defer func() {
+				for k, name := range uploaded {
+					k.client.Files.Delete(context.Background(), name, nil)
+				}
+			}()
+			uris := map[*poolKey]string{}
+			parts = func(ctx context.Context, k *poolKey) ([]*genai.Part, error) {
+				if _, ok := uris[k]; !ok {
+					f, err := k.client.Files.Upload(ctx, bytes.NewReader(in.PDF), &genai.UploadFileConfig{MIMEType: "application/pdf", DisplayName: "material.pdf"})
+					if err != nil {
+						return nil, fmt.Errorf("gemini file upload: %w", err)
+					}
+					uploaded[k], uris[k] = f.Name, f.URI
+				}
+				return []*genai.Part{genai.NewPartFromURI(uris[k], "application/pdf"), genai.NewPartFromText(pdfPrompt(in))}, nil
 			}
-			defer g.client.Files.Delete(context.Background(), f.Name, nil)
-			parts = append(parts, genai.NewPartFromURI(f.URI, "application/pdf"))
 		}
-		parts = append(parts, genai.NewPartFromText(pdfPrompt(in)))
 	} else {
-		parts = append(parts, genai.NewPartFromText(fmt.Sprintf(
-			"Material type: %s\nTitle: %s\n\n<material>\n%s\n</material>\n\nDigest this material.", in.Kind, in.Title, in.Text)))
+		parts = fixedParts([]*genai.Part{genai.NewPartFromText(fmt.Sprintf(
+			"Material type: %s\nTitle: %s\n\n<material>\n%s\n</material>\n\nDigest this material.", in.Kind, in.Title, in.Text))})
 	}
 	cfg := &genai.GenerateContentConfig{ResponseMIMEType: "application/json", Temperature: genai.Ptr[float32](0.2)}
-	_, text, u, err := g.generate(ctx, g.digestModel, digestSystem+digestFormat, parts, cfg)
+	_, text, u, err := g.generateWith(ctx, g.digestModel, digestSystem+digestFormat, parts, cfg)
 	if err != nil {
 		return Digest{}, u, err
 	}

@@ -204,5 +204,15 @@ func (s *Service) courseProgress(c *coursemodels.Course) *BuildProgress {
 	s.db.Select("id, status, reading, paused").Where("course_id = ?", *c.CourseId).Find(&mats)
 	var units int64
 	s.db.Model(&Unit{}).Where("course_id = ?", *c.CourseId).Count(&units)
-	return buildProgress(c, mats, int(units))
+	p := buildProgress(c, mats, int(units))
+	// Read, and about to be organised by itself (afterRead runs just after
+	// the material is saved): keep showing progress
+	anyReady := false
+	for _, m := range mats {
+		anyReady = anyReady || m.Status == StatusReady
+	}
+	if p != nil && p.Stage == "waiting" && anyReady && c.OrganiseRuns == 0 && c.CourseStatus != "published" && s.UserAllowance(c.UserId).CanUseAI {
+		p.Active, p.Stage, p.Label = true, "organising", "Starting to organise your units"
+	}
+	return p
 }

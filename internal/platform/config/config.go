@@ -47,6 +47,7 @@ type Config struct {
 
 	YouTubeAPIKey    string
 	GeminiAPIKey     string
+	GeminiAPIKeys    []string // GEMINI_API_KEY then GEMINI_API_KEYS (comma-separated): the course builder takes turns
 	GeminiModel      string
 	GeminiGradeModel string
 
@@ -68,6 +69,7 @@ type Config struct {
 	FreeOrganiseRuns   int
 	FreeQuestionRuns   int // AI question pools per unit
 	TestsPerDay        int // test starts per learner per day
+	NewCoursesPerDay   int
 	PDFPartPages       int // long PDFs are read this many pages at a time
 	VideoPartMinutes   int // long videos are watched this many minutes at a time
 	PDFFirstPages      int // the first part is shorter, so units come quickly
@@ -111,6 +113,7 @@ func Load() (*Config, error) {
 
 		YouTubeAPIKey:    os.Getenv("YOUTUBE_API_KEY"),
 		GeminiAPIKey:     os.Getenv("GEMINI_API_KEY"),
+		GeminiAPIKeys:    append([]string{os.Getenv("GEMINI_API_KEY")}, strings.Split(os.Getenv("GEMINI_API_KEYS"), ",")...),
 		GeminiModel:      os.Getenv("GEMINI_MODEL"),
 		GeminiGradeModel: os.Getenv("GEMINI_GRADE_MODEL"),
 
@@ -134,6 +137,7 @@ func Load() (*Config, error) {
 		FreeOrganiseRuns:   getInt("FREE_ORGANISE_RUNS", 3),
 		FreeQuestionRuns:   getInt("FREE_QUESTION_RUNS", 3),
 		TestsPerDay:        getInt("TESTS_PER_DAY", 20),
+		NewCoursesPerDay:   getInt("NEW_COURSES_PER_DAY", 1),
 		PDFPartPages:       getInt("AI_PDF_PART_PAGES", 25),
 		VideoPartMinutes:   getInt("AI_VIDEO_PART_MINUTES", 10),
 		PDFFirstPages:      getInt("AI_PDF_FIRST_PART_PAGES", 8),

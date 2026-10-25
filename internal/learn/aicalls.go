@@ -18,6 +18,7 @@ type AICall struct {
 	ID           int       `json:"id" gorm:"primaryKey"`
 	Provider     string    `json:"provider" gorm:"size:16;not null"`
 	Model        string    `json:"model" gorm:"size:64;not null;index:idx_ai_calls_model_time"`
+	Key          string    `json:"key" gorm:"size:16"` // which of several keys ("key 2"), never the key itself
 	InputTokens  int64     `json:"input_tokens"`
 	OutputTokens int64     `json:"output_tokens"`
 	OK           bool      `json:"ok"`
@@ -29,12 +30,12 @@ type AICall struct {
 func (AICall) TableName() string { return "ai_calls" }
 
 // CallRecorder is told about every provider request.
-type CallRecorder func(provider, model string, in, out int64, err error)
+type CallRecorder func(provider, model, key string, in, out int64, err error)
 
 // recorder stores calls; it never blocks the AI work for long.
 func recorder(db *gorm.DB) CallRecorder {
-	return func(provider, model string, in, out int64, err error) {
-		row := AICall{Provider: provider, Model: model, InputTokens: in, OutputTokens: out, OK: err == nil}
+	return func(provider, model, key string, in, out int64, err error) {
+		row := AICall{Provider: provider, Model: model, Key: key, InputTokens: in, OutputTokens: out, OK: err == nil}
 		if err != nil {
 			row.Error = clip(err.Error(), 4000)
 			row.QuotaError = strings.Contains(row.Error, "429") || strings.Contains(row.Error, "RESOURCE_EXHAUSTED")
@@ -170,5 +171,38 @@ func (s *Service) AIQuota() map[string]any {
 		"day_start": start, "resets_at": next, "now": now, "models": models,
 		"month_spend_usd": s.MonthSpendUSD(), "monthly_budget_usd": s.limits.MonthlyBudgetUSD,
 		"user_daily_usd": s.limits.UserDailyUSD, "user_monthly_usd": s.limits.UserMonthlyUSD, "users": s.topUsers(20),
+		"gemini_keys": s.keyUse(start),
 	}
+}
+
+// KeyUse is one Gemini key's requests today and the models it rests for.
+type KeyUse struct {
+	Key         string               `json:"key"`
+	Requests    int64                `json:"requests"`
+	OK          int64                `json:"ok"`
+	QuotaErrors int64                `json:"quota_errors"`
+	Resting     map[string]time.Time `json:"resting"` // model → free again at
+}
+
+func (s *Service) keyUse(since time.Time) []KeyUse {
+	var rows []struct {
+		Key                   string
+		Requests, OK, QuotaEr int64
+	}
+	s.db.Model(&AICall{}).Where("provider = ? AND key <> '' AND created_at >= ?", "gemini", since).
+		Select("key, COUNT(*) AS requests, SUM(CASE WHEN ok THEN 1 ELSE 0 END) AS ok, SUM(CASE WHEN quota_error THEN 1 ELSE 0 END) AS quota_er").
+		Group("key").Scan(&rows)
+	byKey := map[string]*KeyUse{}
+	var out []KeyUse
+	for _, st := range geminiKeyStatus() {
+		name := st["key"].(string)
+		out = append(out, KeyUse{Key: name, Resting: st["resting"].(map[string]time.Time)})
+		byKey[name] = &out[len(out)-1]
+	}
+	for _, r := range rows {
+		if k, ok := byKey[r.Key]; ok {
+			k.Requests, k.OK, k.QuotaErrors = r.Requests, r.OK, r.QuotaEr
+		}
+	}
+	return out
 }
