@@ -224,6 +224,8 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		PartPages:             cfg.PDFPartPages,
 		VideoPartSeconds:      cfg.VideoPartMinutes * 60,
 		MonthlyBudgetUSD:      cfg.AIMonthlyBudgetUSD,
+		UserDailyUSD:          cfg.AIUserDailyUSD,
+		UserMonthlyUSD:        cfg.AIUserMonthlyUSD,
 	}
 	if cfg.AIMonthlyBudgetUSD > 0 {
 		slog.Info("AI monthly budget", "usd", cfg.AIMonthlyBudgetUSD)

@@ -26,6 +26,8 @@ type Limits struct {
 	// MonthlyBudgetUSD pauses new AI work once this calendar month's logged
 	// AI spend reaches it (0 = no cap). Set in AI_MONTHLY_BUDGET_USD.
 	MonthlyBudgetUSD      float64 `json:"-"`
+	UserDailyUSD          float64 `json:"-"` // each creator's AI allowance (allowance.go); 0 = none
+	UserMonthlyUSD        float64 `json:"-"`
 	CoursesPerUser        int     `json:"courses_per_user"`
 	MaterialsPerCourse    int     `json:"materials_per_course"`
 	MaxFileBytes          int64   `json:"max_file_bytes"`
@@ -131,8 +133,8 @@ func (s *Service) startReferences(c *coursemodels.Course, onlyMissing bool) erro
 	if s.refs == nil {
 		return errors.New("Finding references is not switched on yet on this server.")
 	}
-	if err := s.checkBudget(); err != nil {
-		return errors.New(budgetMessage)
+	if err := s.checkAI(c.UserId); err != nil {
+		return errors.New(limitMessage(err))
 	}
 	res := s.db.Model(&coursemodels.Course{}).Where("course_id = ? AND references_status <> ?", *c.CourseId, StatusProcessing).
 		Update("references_status", StatusProcessing)
@@ -166,8 +168,8 @@ func (s *Service) findReferences(courseID, ownerID int, onlyMissing bool) {
 		if len(concepts) == 0 {
 			continue
 		}
-		if s.checkBudget() != nil {
-			slog.Warn("AI budget reached: reference search stopped", "course", courseID)
+		if s.checkAI(ownerID) != nil {
+			slog.Warn("AI budget or allowance reached: reference search stopped", "course", courseID)
 			failed++
 			break
 		}
@@ -427,9 +429,9 @@ func (s *Service) digest(materialID int, data []byte) {
 		}
 		m.TotalPages = pages // short, or cannot be split: read in one piece
 	}
-	if err := s.checkBudget(); err != nil {
-		slog.Warn("AI budget reached: digest skipped", "material", m.ID)
-		s.failMaterial(&m, budgetMessage)
+	if err := s.checkAI(m.OwnerID); err != nil {
+		slog.Warn("AI budget or allowance reached: digest skipped", "material", m.ID)
+		s.failMaterial(&m, limitMessage(err))
 		return
 	}
 	started := time.Now()
@@ -482,8 +484,8 @@ func digestErrorMessage(kind string, err error) string {
 		return "AI reading is not switched on yet on this server."
 	case errors.Is(err, ErrAICredit):
 		return creditMessage
-	case errors.Is(err, ErrBudget):
-		return budgetMessage
+	case errors.Is(err, ErrBudget), errors.Is(err, ErrAllowance):
+		return limitMessage(err)
 	case kind == KindVideo:
 		return "The AI could not watch this video (it may be private, age-restricted, too long, or the daily video limit was reached). Try again later."
 	}
@@ -542,8 +544,8 @@ func (s *Service) digestPart(m *Material, data []byte, total int) bool {
 		partFail("This PDF could not be split into parts. Try saving it again as PDF and uploading it.")
 		return true
 	}
-	if err := s.checkBudget(); err != nil {
-		partFail(budgetMessage)
+	if err := s.checkAI(m.OwnerID); err != nil {
+		partFail(limitMessage(err))
 		return true
 	}
 	started := time.Now()
@@ -598,8 +600,8 @@ func (s *Service) digestVideoPart(m *Material, total int) {
 		s.db.Model(m).Updates(map[string]any{"reading": false, "status": StatusReady,
 			"error": fmt.Sprintf("%s to %s of %s was not watched yet: %s", clock(from), clock(to), clock(total), msg)})
 	}
-	if err := s.checkBudget(); err != nil {
-		partFail(budgetMessage)
+	if err := s.checkAI(m.OwnerID); err != nil {
+		partFail(limitMessage(err))
 		return
 	}
 	part := VideoPart{From: from, To: to, Total: total}
@@ -683,8 +685,8 @@ func (s *Service) StartOrganise(c *coursemodels.Course) error {
 	if c.OrganiseStatus == StatusProcessing {
 		return errors.New("The course is already being organised.")
 	}
-	if err := s.checkBudget(); err != nil {
-		return errors.New(budgetMessage)
+	if err := s.checkAI(c.UserId); err != nil {
+		return errors.New(limitMessage(err))
 	}
 	if s.limits.OrganiseRunsPerCourse > 0 && c.OrganiseRuns >= s.limits.OrganiseRunsPerCourse {
 		return fmt.Errorf("The free plan allows %d AI organise runs per course. You can still edit the units by hand.", s.limits.OrganiseRunsPerCourse)

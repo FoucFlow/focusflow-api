@@ -60,6 +60,8 @@ type Config struct {
 	AIProvider      string
 
 	AIMonthlyBudgetUSD float64
+	AIUserDailyUSD     float64 // each creator's AI allowance (0 = none)
+	AIUserMonthlyUSD   float64
 
 	FreeCourseLimit    int
 	FreeMaterialsLimit int
@@ -122,6 +124,8 @@ func Load() (*Config, error) {
 		AIProvider:      os.Getenv("AI_PROVIDER"), // claude | gemini | fake (empty: claude if its key is set, else gemini)
 
 		AIMonthlyBudgetUSD: getFloat("AI_MONTHLY_BUDGET_USD", 0),
+		AIUserDailyUSD:     getFloat("AI_USER_DAILY_USD", 0.5),
+		AIUserMonthlyUSD:   getFloat("AI_USER_MONTHLY_USD", 2),
 
 		FreeCourseLimit:    getInt("FREE_COURSE_LIMIT", 2),
 		FreeMaterialsLimit: getInt("FREE_MATERIALS_PER_COURSE", 15),

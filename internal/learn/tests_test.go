@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestDrawItemsShufflesButKeepsTheRightAnswer(t *testing.T) {
@@ -139,5 +140,29 @@ func TestFallbackOnlyOnCreditErrors(t *testing.T) {
 	}
 	if _, _, err := f.MarkAnswers(context.Background(), MarkInput{}); err == nil || errors.Is(err, ErrAICredit) {
 		t.Fatalf("other errors are not handed to the backup: %v", err)
+	}
+}
+
+func TestAllowanceHelpers(t *testing.T) {
+	if p := usedPercent(1, 0.5); p != 1 {
+		t.Fatalf("any use shows at least 1%%, got %d", p)
+	}
+	if p := usedPercent(250000, 0.5); p != 50 {
+		t.Fatalf("$0.25 of $0.50 is 50%%, got %d", p)
+	}
+	if p := usedPercent(900000, 0.5); p != 100 {
+		t.Fatalf("going over shows 100%%, got %d", p)
+	}
+	if s := untilText(3*time.Hour + 19*time.Minute + 10*time.Second); s != "3 h 20 min" {
+		t.Fatalf("got %q", s)
+	}
+	now := time.Date(2026, 10, 31, 23, 30, 0, 0, time.UTC)
+	day, nextDay, month, nextMonth := allowanceWindows(now)
+	if day.Day() != 31 || nextDay.Month() != 11 || month.Day() != 1 || nextMonth.Month() != 11 || nextMonth.Day() != 1 {
+		t.Fatalf("windows: %v %v %v %v", day, nextDay, month, nextMonth)
+	}
+	err := error(&allowanceError{"used up"})
+	if !errors.Is(err, ErrAllowance) || limitMessage(err) != "used up" || limitMessage(ErrBudget) != budgetMessage {
+		t.Fatal("allowance errors carry their own message")
 	}
 }

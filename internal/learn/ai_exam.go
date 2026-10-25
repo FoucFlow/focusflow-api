@@ -274,7 +274,7 @@ func (FakeAI) WriteQuestions(_ context.Context, in QuestionsInput) ([]Question, 
 		qs = append(qs, Question{Kind: QuestionShort, Concept: c.Title, Source: "ai", Options: []string{},
 			Prompt: "In one sentence, what is " + c.Title + "?", AnswerGuide: "- mentions the word \"correct\""})
 	}
-	return qs, Usage{Provider: "fake", Model: "fake"}, nil
+	return qs, fakeUsage, nil
 }
 
 // MarkAnswers: 1 if the answer contains "correct", 0.5 if it contains "partly", else 0.
@@ -291,5 +291,5 @@ func (FakeAI) MarkAnswers(_ context.Context, in MarkInput) (map[int]AIMark, Usag
 		}
 		out[it.Index] = m
 	}
-	return out, Usage{Provider: "fake", Model: "fake"}, nil
+	return out, fakeUsage, nil
 }

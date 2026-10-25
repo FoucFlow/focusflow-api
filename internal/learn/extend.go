@@ -76,8 +76,8 @@ func (s *Service) extend(courseID, ownerID int) {
 		}
 		in.ExistingUnits = append(in.ExistingUnits, eu)
 	}
-	if err := s.checkBudget(); err != nil {
-		done(budgetMessage)
+	if err := s.checkAI(ownerID); err != nil {
+		done(limitMessage(err))
 		return
 	}
 

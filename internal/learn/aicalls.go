@@ -169,5 +169,6 @@ func (s *Service) AIQuota() map[string]any {
 	return map[string]any{
 		"day_start": start, "resets_at": next, "now": now, "models": models,
 		"month_spend_usd": s.MonthSpendUSD(), "monthly_budget_usd": s.limits.MonthlyBudgetUSD,
+		"user_daily_usd": s.limits.UserDailyUSD, "user_monthly_usd": s.limits.UserMonthlyUSD, "users": s.topUsers(20),
 	}
 }

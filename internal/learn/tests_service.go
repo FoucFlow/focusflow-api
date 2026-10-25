@@ -91,8 +91,8 @@ func (s *Service) StartQuestions(u *Unit, c *coursemodels.Course) error {
 	if s.exam == nil {
 		return errors.New("Writing test questions with AI is not switched on yet on this server.")
 	}
-	if err := s.checkBudget(); err != nil {
-		return errors.New(budgetMessage)
+	if err := s.checkAI(c.UserId); err != nil {
+		return errors.New(limitMessage(err))
 	}
 	var n int64
 	s.db.Model(&Concept{}).Where("unit_id = ?", u.ID).Count(&n)
@@ -145,8 +145,8 @@ func (s *Service) writeQuestions(unitID, ownerID int) {
 		s.db.Model(&TestSettings{}).Where("unit_id = ?", unitID).Updates(map[string]any{
 			"pool_status": StatusFailed, "pool_error": msg, "pool_runs": gorm.Expr("GREATEST(pool_runs - 1, 0)")})
 	}
-	if s.checkBudget() != nil {
-		fail(budgetMessage)
+	if err := s.checkAI(ownerID); err != nil {
+		fail(limitMessage(err))
 		return
 	}
 	started := time.Now()

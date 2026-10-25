@@ -106,6 +106,10 @@ func (h *Handler) AddMaterial(c *gin.Context) {
 		return
 	}
 	me := c.GetInt(auth.CtxUserID)
+	if err := h.s.checkAI(me); err != nil {
+		fail(c, http.StatusUnprocessableEntity, limitMessage(err))
+		return
+	}
 
 	if strings.HasPrefix(c.ContentType(), "multipart/") {
 		h.uploadFile(c, course, me)
@@ -215,6 +219,10 @@ const uploadTokenTTL = 10 * time.Minute
 func (h *Handler) UploadURL(c *gin.Context) {
 	course, ok := h.ownedCourse(c)
 	if !ok {
+		return
+	}
+	if err := h.s.checkAI(c.GetInt(auth.CtxUserID)); err != nil {
+		fail(c, http.StatusUnprocessableEntity, limitMessage(err))
 		return
 	}
 	exp := time.Now().Add(uploadTokenTTL)
@@ -411,7 +419,7 @@ func (h *Handler) GetCourse(c *gin.Context) {
 		h.s.db.Model(&coursemodels.Enrollment{}).Where("course_id = ?", id).Count(&learners)
 		c.JSON(http.StatusOK, gin.H{"data": gin.H{
 			"role": "creator", "course": course, "materials": mats, "units": views,
-			"learners": learners, "limits": h.s.limits,
+			"learners": learners, "limits": h.s.limits, "ai_allowance": h.s.UserAllowance(course.UserId),
 		}})
 		return
 	}
@@ -790,7 +798,7 @@ func (h *Handler) Me(c *gin.Context) {
 	canCreate, reason := h.s.CanCreateCourse(me, isAdmin(c))
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"created": created, "joined": joined, "limits": h.s.limits,
-		"can_create_course": canCreate, "create_limit_reason": reason,
+		"can_create_course": canCreate, "create_limit_reason": reason, "ai_allowance": h.s.UserAllowance(me),
 	}})
 }
 

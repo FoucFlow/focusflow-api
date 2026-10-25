@@ -188,6 +188,10 @@ func (disabledAI) Organise(context.Context, OrganiseInput) (Outline, Usage, erro
 	return Outline{}, Usage{}, ErrAIUnavailable
 }
 
+// fakeUsage: each fake call "costs" a tenth of a cent, so local runs exercise the
+// creators' AI allowance.
+var fakeUsage = Usage{Provider: "fake", Model: "fake", InputTokens: 20000, OutputTokens: 2000, CostMicroUSD: 1000}
+
 // FakeAI is a deterministic provider for local development and tests
 // (AI_PROVIDER=fake; refused in production). It makes one unit per material.
 type FakeAI struct{}
@@ -203,7 +207,7 @@ func (FakeAI) Digest(_ context.Context, in DigestInput) (Digest, Usage, error) {
 		}
 		d.Concepts = append(d.Concepts, c)
 	}
-	return d, Usage{Provider: "fake", Model: "fake"}, nil
+	return d, fakeUsage, nil
 }
 
 // FindReferences: one reference per concept.
@@ -213,7 +217,7 @@ func (FakeAI) FindReferences(_ context.Context, in EnrichInput) (map[int][]Refer
 		out[c.Index] = []Reference{{Title: "About " + c.Title, URL: "https://en.wikipedia.org/wiki/Special:Search?search=" + strings.ReplaceAll(c.Title, " ", "+"),
 			Site: "en.wikipedia.org", Why: "A general overview of " + c.Title}}
 	}
-	return out, Usage{Provider: "fake", Model: "fake"}, nil
+	return out, fakeUsage, nil
 }
 
 // DigestVideoPart: two concepts, 30 s and 120 s into the part.
@@ -221,7 +225,7 @@ func (FakeAI) DigestVideoPart(_ context.Context, _, title, _ string, p VideoPart
 	a, b := p.From+30, p.From+120
 	return Digest{Summary: "Video digest of " + title, Topics: []string{title}, KeyPoints: []string{},
 		Concepts: []SourceConcept{{Name: fmt.Sprintf("%s idea at %d", title, a), Summary: "An idea", StartSeconds: &a},
-			{Name: fmt.Sprintf("%s idea at %d", title, b), Summary: "Another idea", StartSeconds: &b}}}, Usage{Provider: "fake", Model: "fake"}, nil
+			{Name: fmt.Sprintf("%s idea at %d", title, b), Summary: "Another idea", StartSeconds: &b}}}, fakeUsage, nil
 }
 
 // DigestVideo: two concepts, at 0:30 and 2:00.
@@ -229,7 +233,7 @@ func (FakeAI) DigestVideo(_ context.Context, _, title, _ string) (Digest, Usage,
 	a, b := 30, 120
 	return Digest{Summary: "Video digest of " + title, Topics: []string{title}, KeyPoints: []string{},
 		Concepts: []SourceConcept{{Name: title + " idea 1", Summary: "First idea", StartSeconds: &a},
-			{Name: title + " idea 2", Summary: "Second idea", StartSeconds: &b}}}, Usage{Provider: "fake", Model: "fake"}, nil
+			{Name: title + " idea 2", Summary: "Second idea", StartSeconds: &b}}}, fakeUsage, nil
 }
 
 // Organise: one unit per material; its concepts (or the material itself) as sources.
@@ -245,5 +249,5 @@ func (FakeAI) Organise(_ context.Context, in OrganiseInput) (Outline, Usage, err
 		}
 		o.Units = append(o.Units, u)
 	}
-	return o, Usage{Provider: "fake", Model: "fake"}, nil
+	return o, fakeUsage, nil
 }
