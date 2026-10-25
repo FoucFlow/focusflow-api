@@ -18,7 +18,10 @@ const (
 	StatusProcessing = "processing"
 	StatusReady      = "ready"
 	StatusFailed     = "failed"
-	StatusIdle       = "idle"
+	// StatusPaused: a material not read yet waits for the creator's AI
+	// allowance, so the course is organised from what is already read
+	StatusPaused = "paused"
+	StatusIdle   = "idle"
 )
 
 // Material is one item on a course canvas.
@@ -41,6 +44,9 @@ type Material struct {
 	TotalPages int  `json:"total_pages,omitempty"`
 	ReadPages  int  `json:"read_pages,omitempty"`
 	Reading    bool `json:"reading"`
+	// Paused: later parts wait for the creator's AI allowance (build.go)
+	Paused      bool `json:"paused"`
+	KeepReading bool `json:"-"` // the creator pressed Continue: read on below the reserve
 	// Long videos are watched in parts the same way (seconds)
 	TotalSeconds int `json:"total_seconds,omitempty"`
 	ReadSeconds  int `json:"read_seconds,omitempty"`

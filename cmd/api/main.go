@@ -223,6 +223,8 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		TestsPerDay:           cfg.TestsPerDay,
 		PartPages:             cfg.PDFPartPages,
 		VideoPartSeconds:      cfg.VideoPartMinutes * 60,
+		FirstPartPages:        cfg.PDFFirstPages,
+		FirstVideoSeconds:     cfg.VideoFirstMinutes * 60,
 		MonthlyBudgetUSD:      cfg.AIMonthlyBudgetUSD,
 		UserDailyUSD:          cfg.AIUserDailyUSD,
 		UserMonthlyUSD:        cfg.AIUserMonthlyUSD,

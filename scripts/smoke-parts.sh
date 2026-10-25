@@ -61,11 +61,11 @@ t "materials list" 200 "${A[@]}" $B/api/learn/courses/$CID/materials
 check "  all concepts marked organised" "all(c.get('organised') for m in d['data'] for c in (m['digest']['concepts'] or []))"
 t "a fully read PDF cannot be retried" 422 "${A[@]}" -X POST $B/api/learn/materials/$MID/retry
 
-# A 25-minute video (FAKE_VIDEO_SECONDS=1500), watched 10 minutes at a time
+# A 25-minute video (FAKE_VIDEO_SECONDS=1500): a short first clip (3 min), then 10 minutes at a time
 t "add a long video" 201 "${A[@]}" "${J[@]}" -d '{"kind":"video","url":"https://youtu.be/dQw4w9WgXcQ","title":"Lecture"}' $B/api/learn/courses/$CID/materials
 VID=$(py "d['data']['id']")
 wait_for $B/api/learn/courses/$CID/materials "[m for m in d['data'] if m['id']==$VID][0]['read_seconds']==1500" || echo "FAIL watching did not finish"
-check "  watched in 3 parts, timestamps of the whole video" "(lambda m: m['total_seconds']==1500 and not m['reading'] and [c['start_seconds'] for c in m['digest']['concepts']]==[30,120,630,720,1230,1320])([m for m in d['data'] if m['id']==$VID][0])"
+check "  watched 0-3, 3-13, 13-25 min, timestamps of the whole video" "(lambda m: m['total_seconds']==1500 and not m['reading'] and [c['start_seconds'] for c in m['digest']['concepts']]==[30,120,210,300,810,900])([m for m in d['data'] if m['id']==$VID][0])"
 wait_for $B/api/learn/courses/$CID "d['data']['course']['organise_status']=='ready' and not d['data']['course']['organise_more'] and sum(len(u['concepts']) for u in d['data']['units'])>=13" || echo "FAIL video units not added"
 check "  video concepts added as new units, unit 1 kept" "d['data']['units'][0]['title']=='My own title' and sum(len(u['concepts']) for u in d['data']['units'][1:])==12"
 

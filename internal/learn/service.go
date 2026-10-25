@@ -36,9 +36,26 @@ type Limits struct {
 	TestsPerDay           int     `json:"tests_per_day"`          // test starts per learner per day (written answers cost AI)
 	PartPages             int     `json:"part_pages"`             // long PDFs are read this many pages at a time (0 = whole file)
 	VideoPartSeconds      int     `json:"video_part_seconds"`     // long videos are watched this long at a time (0 = whole video)
+	// The first part is short, so units can be made from it quickly
+	FirstPartPages    int `json:"first_part_pages"`
+	FirstVideoSeconds int `json:"first_video_seconds"`
 }
 
-var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileBytes: 20 << 20, OrganiseRunsPerCourse: 3, QuestionRunsPerUnit: 3, TestsPerDay: 20, PartPages: 25, VideoPartSeconds: 600}
+func (l Limits) partPages(first bool) int {
+	if first && l.FirstPartPages > 0 && l.FirstPartPages < l.PartPages {
+		return l.FirstPartPages
+	}
+	return l.PartPages
+}
+
+func (l Limits) videoPart(first bool) int {
+	if first && l.FirstVideoSeconds > 0 && l.FirstVideoSeconds < l.VideoPartSeconds {
+		return l.FirstVideoSeconds
+	}
+	return l.VideoPartSeconds
+}
+
+var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileBytes: 20 << 20, OrganiseRunsPerCourse: 3, QuestionRunsPerUnit: 3, TestsPerDay: 20, PartPages: 25, VideoPartSeconds: 600, FirstPartPages: 8, FirstVideoSeconds: 180}
 
 type Service struct {
 	db          *gorm.DB
@@ -137,7 +154,7 @@ func (s *Service) startReferences(c *coursemodels.Course, onlyMissing bool) erro
 		return errors.New(limitMessage(err))
 	}
 	res := s.db.Model(&coursemodels.Course{}).Where("course_id = ? AND references_status <> ?", *c.CourseId, StatusProcessing).
-		Update("references_status", StatusProcessing)
+		Updates(map[string]any{"references_status": StatusProcessing, "references_done": 0, "references_total": 0})
 	if res.RowsAffected == 0 {
 		return errors.New("References are already being found.")
 	}
@@ -153,7 +170,16 @@ func (s *Service) findReferences(courseID, ownerID int, onlyMissing bool) {
 		return
 	}
 	failed := 0
-	for _, u := range s.units(courseID) {
+	units := s.units(courseID)
+	progress := func(done int) {
+		s.db.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).
+			Updates(map[string]any{"references_done": done, "references_total": len(units)})
+	}
+	progress(0)
+	for i, u := range units {
+		if i > 0 {
+			progress(i)
+		}
 		var concepts []Concept
 		s.db.Where("unit_id = ?", u.ID).Order("position, id").Find(&concepts)
 		if onlyMissing {
@@ -205,6 +231,7 @@ func (s *Service) findReferences(courseID, ownerID int, onlyMissing bool) {
 
 // ResumePending re-queues work that was interrupted by a restart.
 func (s *Service) ResumePending() {
+	go s.resumeLoop()
 	var mats []Material
 	s.db.Where("status = ? OR reading", StatusProcessing).Find(&mats)
 	for _, m := range mats {
@@ -382,9 +409,9 @@ func partlyRead(m *Material) bool {
 
 func (s *Service) Retry(m *Material) {
 	if partlyRead(m) {
-		s.db.Model(m).Updates(map[string]any{"reading": true, "error": ""})
+		s.db.Model(m).Updates(map[string]any{"reading": true, "paused": false, "keep_reading": true, "error": ""})
 	} else {
-		s.db.Model(m).Updates(map[string]any{"status": StatusProcessing, "error": "", "read_pages": 0, "read_seconds": 0, "reading": false})
+		s.db.Model(m).Updates(map[string]any{"status": StatusProcessing, "error": "", "read_pages": 0, "read_seconds": 0, "reading": false, "paused": false, "keep_reading": true})
 	}
 	id := m.ID
 	s.enqueue(func() { s.digest(id, nil) })
@@ -412,6 +439,11 @@ func (s *Service) digest(materialID int, data []byte) {
 	if err := s.db.First(&m, materialID).Error; err != nil {
 		return
 	}
+	defer s.afterRead(m.CourseID)
+	if m.Status == StatusProcessing && !m.KeepReading && s.shouldWait(&m) {
+		s.db.Model(&m).Updates(map[string]any{"status": StatusPaused, "error": waitMessage})
+		return
+	}
 	ctx := context.Background()
 	in := DigestInput{Kind: m.Kind, Title: m.Title, Text: m.Text}
 	if m.Kind == KindPDF {
@@ -424,7 +456,7 @@ func (s *Service) digest(materialID int, data []byte) {
 		}
 		in.PDF = data
 		pages := pdfPageCount(data)
-		if s.limits.PartPages > 0 && pages > s.limits.PartPages && s.digestPart(&m, data, pages) {
+		if first := s.limits.partPages(true); first > 0 && pages > first && s.digestPart(&m, data, pages) {
 			return
 		}
 		m.TotalPages = pages // short, or cannot be split: read in one piece
@@ -448,7 +480,7 @@ func (s *Service) digest(materialID int, data []byte) {
 				total = n
 			}
 		}
-		if total > s.limits.VideoPartSeconds+s.limits.VideoPartSeconds/2 {
+		if first := s.limits.videoPart(true); total > first+first/2 {
 			s.digestVideoPart(&m, total)
 			return
 		}
@@ -521,11 +553,11 @@ func (s *Service) digestPart(m *Material, data []byte, total int) bool {
 		s.db.Model(m).Updates(map[string]any{"reading": false, "status": StatusReady})
 		return true
 	}
-	to := from + s.limits.PartPages - 1
+	first := m.ReadPages == 0
+	to := from + s.limits.partPages(first) - 1
 	if to > total {
 		to = total
 	}
-	first := m.ReadPages == 0
 	// A later part that fails keeps what was read; Retry continues from here
 	partFail := func(msg string) {
 		if first {
@@ -546,6 +578,10 @@ func (s *Service) digestPart(m *Material, data []byte, total int) bool {
 	}
 	if err := s.checkAI(m.OwnerID); err != nil {
 		partFail(limitMessage(err))
+		return true
+	}
+	if !first && !m.KeepReading && !s.canReadMore(m.OwnerID) {
+		s.pauseReading(m)
 		return true
 	}
 	started := time.Now()
@@ -574,8 +610,7 @@ func (s *Service) digestPart(m *Material, data []byte, total int) bool {
 		partFail("Could not save what the AI read. Please retry.")
 		return true
 	}
-	// Courses already organised get new units for these pages
-	s.maybeExtend(m.CourseID)
+	// (digest's afterRead gives organised courses units for these pages)
 	if more {
 		id := m.ID
 		s.enqueue(func() { s.digest(id, data) })
@@ -587,11 +622,12 @@ func (s *Service) digestPart(m *Material, data []byte, total int) bool {
 // finds, telling the AI which concepts earlier parts already found.
 func (s *Service) digestVideoPart(m *Material, total int) {
 	from := m.ReadSeconds
-	to := from + s.limits.VideoPartSeconds
-	if total-to < s.limits.VideoPartSeconds/2 {
+	first := from == 0
+	size := s.limits.videoPart(first)
+	to := from + size
+	if total-to < size/2 {
 		to = total // no tiny last part
 	}
-	first := from == 0
 	partFail := func(msg string) {
 		if first {
 			s.failMaterial(m, msg)
@@ -602,6 +638,10 @@ func (s *Service) digestVideoPart(m *Material, total int) {
 	}
 	if err := s.checkAI(m.OwnerID); err != nil {
 		partFail(limitMessage(err))
+		return
+	}
+	if !first && !m.KeepReading && !s.canReadMore(m.OwnerID) {
+		s.pauseReading(m)
 		return
 	}
 	part := VideoPart{From: from, To: to, Total: total}
@@ -636,7 +676,6 @@ func (s *Service) digestVideoPart(m *Material, total int) {
 		partFail("Could not save what the AI watched. Please retry.")
 		return
 	}
-	s.maybeExtend(m.CourseID)
 	if more {
 		id := m.ID
 		s.enqueue(func() { s.digest(id, nil) })
@@ -702,7 +741,8 @@ func (s *Service) StartOrganise(c *coursemodels.Course) error {
 	}
 	res := s.db.Model(&coursemodels.Course{}).
 		Where("course_id = ? AND organise_status <> ?", *c.CourseId, StatusProcessing).
-		Updates(map[string]any{"organise_status": StatusProcessing, "organise_more": false, "organise_error": "", "organise_runs": gorm.Expr("organise_runs + 1")})
+		Updates(map[string]any{"organise_status": StatusProcessing, "organise_more": false, "organise_error": "", "organise_runs": gorm.Expr("organise_runs + 1"),
+			"organise_done": 0, "organise_total": 0})
 	if res.RowsAffected == 0 {
 		return errors.New("The course is already being organised.")
 	}
@@ -719,6 +759,7 @@ func (s *Service) organise(courseID, ownerID int) {
 	var mats []Material
 	s.db.Where("course_id = ? AND status = ?", courseID, StatusReady).Order("id").Find(&mats)
 	in, refs, taken := organiseInput(c, mats, false)
+	in.Progress = s.organiseProgress(courseID)
 
 	started := time.Now()
 	outline, usage, err := s.ai.Organise(context.Background(), in)

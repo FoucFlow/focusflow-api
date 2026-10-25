@@ -300,6 +300,8 @@ func (a *claudeAI) Organise(ctx context.Context, in OrganiseInput) (Outline, Usa
 	}
 
 	excerpts := excerptIndex(in)
+	in.report(0, len(plan.Units))
+	done := 0
 	var mu sync.Mutex
 	var firstErr error
 	sem := make(chan struct{}, 3)
@@ -321,6 +323,8 @@ func (a *claudeAI) Organise(ctx context.Context, in OrganiseInput) (Outline, Usa
 				return
 			}
 			plan.Units[i].Concepts = written
+			done++
+			in.report(done, len(plan.Units))
 		}(i)
 	}
 	wg.Wait()

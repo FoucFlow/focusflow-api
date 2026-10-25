@@ -123,10 +123,13 @@ func (g *geminiVideoAI) watch(ctx context.Context, youtubeID, title, note string
 	if strings.TrimSpace(note) != "" {
 		intro += "\nCreator's note: " + note
 	}
-	video := &genai.Part{FileData: &genai.FileData{FileURI: "https://www.youtube.com/watch?v=" + youtubeID, MIMEType: "video/*"}}
+	video := &genai.Part{FileData: &genai.FileData{FileURI: "https://www.youtube.com/watch?v=" + youtubeID, MIMEType: "video/*"},
+		// One frame every 2 s (default 1 per second): lectures change slowly,
+		// and frames are most of a video's tokens
+		VideoMetadata: &genai.VideoMetadata{FPS: genai.Ptr(videoFPS)}}
 	prompt := videoDigestPrompt
 	if part != nil {
-		video.VideoMetadata = &genai.VideoMetadata{StartOffset: time.Duration(part.From) * time.Second, EndOffset: time.Duration(part.To) * time.Second}
+		video.VideoMetadata.StartOffset, video.VideoMetadata.EndOffset = time.Duration(part.From)*time.Second, time.Duration(part.To)*time.Second
 		prompt = strings.Replace(prompt, "Watch this ENTIRE video, from start to end,", "Watch this part of the video,", 1) + "\n\n" + videoPartPrompt(*part)
 	}
 	parts := []*genai.Part{genai.NewPartFromText(intro), video, genai.NewPartFromText(prompt)}
@@ -204,6 +207,8 @@ func (g *geminiVideoAI) watch(ctx context.Context, youtubeID, title, note string
 }
 
 // noQuota: the plan allows this model no use at all ("limit: 0"); waiting won't help.
+const videoFPS = 0.5
+
 func noQuota(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, "429") && strings.Contains(s, "limit: 0")

@@ -109,6 +109,15 @@ type OrganiseInput struct {
 	// ExistingUnits is set when adding units for newly read parts: the
 	// course's current units, which stay as they are.
 	ExistingUnits []ExistingUnit
+	// Progress is told how many units are written of how many planned
+	// (0 of n once the plan is made). Optional.
+	Progress func(done, total int) `json:"-"`
+}
+
+func (in OrganiseInput) report(done, total int) {
+	if in.Progress != nil {
+		in.Progress(done, total)
+	}
 }
 
 type ExistingUnit struct {
@@ -248,6 +257,9 @@ func (FakeAI) Organise(_ context.Context, in OrganiseInput) (Outline, Usage, err
 			u.Concepts = append(u.Concepts, OutlineConcept{Title: m.Title, Explanation: m.Summary, Sources: []string{m.Ref}})
 		}
 		o.Units = append(o.Units, u)
+	}
+	for i := 0; i <= len(o.Units); i++ {
+		in.report(i, len(o.Units))
 	}
 	return o, fakeUsage, nil
 }

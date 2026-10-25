@@ -38,7 +38,7 @@ func (s *Service) maybeExtend(courseID int) {
 		return
 	}
 	res := s.db.Model(&coursemodels.Course{}).Where("course_id = ? AND organise_status = ?", courseID, StatusReady).
-		Updates(map[string]any{"organise_status": StatusProcessing, "organise_more": true, "organise_error": ""})
+		Updates(map[string]any{"organise_status": StatusProcessing, "organise_more": true, "organise_error": "", "organise_done": 0, "organise_total": 0})
 	if res.RowsAffected == 0 {
 		return
 	}
@@ -59,6 +59,7 @@ func (s *Service) extend(courseID, ownerID int) {
 	var mats []Material
 	s.db.Where("course_id = ? AND status = ?", courseID, StatusReady).Order("id").Find(&mats)
 	in, refs, taken := organiseInput(c, mats, true)
+	in.Progress = s.organiseProgress(courseID)
 	if len(in.Materials) == 0 {
 		done("")
 		return

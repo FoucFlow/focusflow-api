@@ -70,6 +70,8 @@ type Config struct {
 	TestsPerDay        int // test starts per learner per day
 	PDFPartPages       int // long PDFs are read this many pages at a time
 	VideoPartMinutes   int // long videos are watched this many minutes at a time
+	PDFFirstPages      int // the first part is shorter, so units come quickly
+	VideoFirstMinutes  int
 	FakeVideoSeconds   int // development: the length the fake AI gives every video
 	MaxMaterialFileMB  int
 
@@ -134,6 +136,8 @@ func Load() (*Config, error) {
 		TestsPerDay:        getInt("TESTS_PER_DAY", 20),
 		PDFPartPages:       getInt("AI_PDF_PART_PAGES", 25),
 		VideoPartMinutes:   getInt("AI_VIDEO_PART_MINUTES", 10),
+		PDFFirstPages:      getInt("AI_PDF_FIRST_PART_PAGES", 8),
+		VideoFirstMinutes:  getInt("AI_VIDEO_FIRST_MINUTES", 3),
 		FakeVideoSeconds:   getInt("FAKE_VIDEO_SECONDS", 0),
 		MaxMaterialFileMB:  getInt("MAX_MATERIAL_FILE_MB", 20),
 

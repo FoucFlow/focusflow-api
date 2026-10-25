@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	coursemodels "focusflow-api/internal/course/models"
 )
 
 func TestDrawItemsShufflesButKeepsTheRightAnswer(t *testing.T) {
@@ -164,5 +166,45 @@ func TestAllowanceHelpers(t *testing.T) {
 	err := error(&allowanceError{"used up"})
 	if !errors.Is(err, ErrAllowance) || limitMessage(err) != "used up" || limitMessage(ErrBudget) != budgetMessage {
 		t.Fatal("allowance errors carry their own message")
+	}
+}
+
+func TestBuildProgressStages(t *testing.T) {
+	id := 1
+	c := &coursemodels.Course{CourseId: &id, OrganiseStatus: StatusIdle, ReferencesStatus: StatusIdle}
+	mats := []Material{{Status: StatusReady}, {Status: StatusProcessing}}
+	if p := buildProgress(c, mats, 0); !p.Active || p.Stage != "reading" || p.Percent != 22 {
+		t.Fatalf("1 of 2 read: %+v", p)
+	}
+	mats[1].Status, mats[1].Reading = StatusReady, true
+	c.OrganiseStatus = StatusProcessing
+	if p := buildProgress(c, mats, 0); p.Stage != "organising" || p.Percent != 45 {
+		t.Fatalf("planning: %+v", p)
+	}
+	c.OrganiseDone, c.OrganiseTotal = 2, 4
+	if p := buildProgress(c, mats, 0); p.Percent != 70 {
+		t.Fatalf("2 of 4 units written: %+v", p)
+	}
+	c.OrganiseStatus, c.ReferencesStatus, c.ReferencesDone, c.ReferencesTotal = StatusReady, StatusProcessing, 1, 2
+	if p := buildProgress(c, mats, 4); p.Stage != "references" || p.Percent != 95 {
+		t.Fatalf("references: %+v", p)
+	}
+	c.ReferencesStatus = StatusReady
+	if p := buildProgress(c, mats, 4); p.Active || p.Percent != 100 || !p.More {
+		t.Fatalf("ready, still reading the rest: %+v", p)
+	}
+	if buildProgress(c, nil, 0) != nil {
+		t.Fatal("no materials: no bar")
+	}
+}
+
+func TestFirstPartsAreShort(t *testing.T) {
+	l := Limits{PartPages: 25, FirstPartPages: 8, VideoPartSeconds: 600, FirstVideoSeconds: 180}
+	if l.partPages(true) != 8 || l.partPages(false) != 25 || l.videoPart(true) != 180 || l.videoPart(false) != 600 {
+		t.Fatal("first parts use the short size")
+	}
+	l.FirstPartPages, l.FirstVideoSeconds = 0, 0
+	if l.partPages(true) != 25 || l.videoPart(true) != 600 {
+		t.Fatal("no first size: the normal size")
 	}
 }

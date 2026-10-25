@@ -354,7 +354,7 @@ func (h *Handler) RetryMaterial(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if (m.Status != StatusFailed && !partlyRead(m)) || m.Kind == KindLink || (m.Kind == KindVideo && h.s.videoAI == nil) {
+	if (m.Status != StatusFailed && m.Status != StatusPaused && !partlyRead(m)) || m.Kind == KindLink || (m.Kind == KindVideo && h.s.videoAI == nil) {
 		fail(c, http.StatusUnprocessableEntity, "Only a failed or partly read file, or a failed video, can be retried.")
 		return
 	}
@@ -420,6 +420,7 @@ func (h *Handler) GetCourse(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"data": gin.H{
 			"role": "creator", "course": course, "materials": mats, "units": views,
 			"learners": learners, "limits": h.s.limits, "ai_allowance": h.s.UserAllowance(course.UserId),
+			"progress": h.s.courseProgress(course),
 		}})
 		return
 	}
@@ -444,7 +445,7 @@ func (h *Handler) GetCourse(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"role": "learner", "course": course, "units": views, "enrolled": enrolled,
-		"completed_units": len(done), "total_units": len(units),
+		"completed_units": len(done), "total_units": len(units), "more_coming": h.s.moreComing(id),
 	}})
 }
 
@@ -795,10 +796,17 @@ func (h *Handler) Me(c *gin.Context) {
 		joined = append(joined, joinedRow{Course: e.Course,
 			CompletedUnits: len(h.s.completedUnits(me, e.CourseID)), TotalUnits: len(h.s.units(e.CourseID))})
 	}
+	progress := map[int]*BuildProgress{}
+	for i := range created {
+		if created[i].CourseId != nil {
+			progress[*created[i].CourseId] = h.s.courseProgress(&created[i])
+		}
+	}
 	canCreate, reason := h.s.CanCreateCourse(me, isAdmin(c))
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"created": created, "joined": joined, "limits": h.s.limits,
 		"can_create_course": canCreate, "create_limit_reason": reason, "ai_allowance": h.s.UserAllowance(me),
+		"progress": progress,
 	}})
 }
 
