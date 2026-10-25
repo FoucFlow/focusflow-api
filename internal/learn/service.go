@@ -508,6 +508,9 @@ func (s *Service) digest(materialID int, data []byte) {
 	s.logUsage(task, m.CourseID, m.OwnerID, usage, started, err)
 	if err != nil {
 		slog.Warn("digest failed", "material", m.ID, "error", err)
+		if s.waitForAI(&m, err) {
+			return
+		}
 		s.failMaterial(&m, digestErrorMessage(m.Kind, err))
 		return
 	}
@@ -600,7 +603,9 @@ func (s *Service) digestPart(m *Material, data []byte, total int) bool {
 	s.logUsage("digest", m.CourseID, m.OwnerID, usage, started, err)
 	if err != nil {
 		slog.Warn("digest part failed", "material", m.ID, "pages", fmt.Sprintf("%d-%d", from, to), "error", err)
-		partFail(digestErrorMessage(KindPDF, err))
+		if !s.waitForAI(m, err) {
+			partFail(digestErrorMessage(KindPDF, err))
+		}
 		return true
 	}
 	cleanDigest(&d, from-1)
@@ -666,7 +671,9 @@ func (s *Service) digestVideoPart(m *Material, total int) {
 	s.logUsage("video_digest", m.CourseID, m.OwnerID, usage, started, err)
 	if err != nil {
 		slog.Warn("video part failed", "material", m.ID, "from", from, "to", to, "error", err)
-		partFail(digestErrorMessage(KindVideo, err))
+		if !s.waitForAI(m, err) {
+			partFail(digestErrorMessage(KindVideo, err))
+		}
 		return
 	}
 	cleanDigest(&d, 0)
@@ -784,6 +791,8 @@ func (s *Service) organise(courseID, ownerID int) {
 			msg = "AI organising is not switched on yet on this server."
 		} else if errors.Is(err, ErrAICredit) {
 			msg = creditMessage
+		} else if errors.Is(err, ErrAllKeysResting) {
+			msg = aiBusyOrganise // resumePaused starts it again
 		}
 		// A failed run does not use up the creator's allowance
 		s.db.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).Updates(map[string]any{

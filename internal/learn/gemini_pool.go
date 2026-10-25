@@ -119,10 +119,13 @@ func (p *geminiPool) do(model string, fn func(k *poolKey) error) error {
 		}
 		tried[k] = true
 		err := fn(k)
-		if err == nil || !quotaError(err) {
+		if err == nil || !(quotaError(err) || modelUnavailable(err)) {
 			return err
 		}
 		until := restUntil(err, p.now())
+		if !noQuota(err) && modelUnavailable(err) {
+			until = p.now().AddDate(0, 0, 7) // closed to this key's project: check again in a week
+		}
 		p.restKey(k, model, until)
 		slog.Warn("gemini key over quota, trying the next one", "key", k.name, "model", model, "rest_until", until.Format(time.RFC3339))
 		last = err

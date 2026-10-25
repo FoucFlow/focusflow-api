@@ -47,17 +47,17 @@ func NewGeminiAI(ctx context.Context, keys []string, digestModel, organiseModel,
 		return nil, err
 	}
 	if digestModel == "" {
-		digestModel = "gemini-2.5-flash"
+		digestModel = flashModels[0]
 	}
 	if organiseModel == "" {
 		organiseModel = "gemini-3.1-pro-preview" // 2.5-pro is closed to new API users
 	}
 	if enrichModel == "" {
-		enrichModel = "gemini-2.5-flash"
+		enrichModel = flashModels[0]
 	}
 	return &geminiAI{
 		pool: pool, digestModel: digestModel, organiseModel: organiseModel, enrichModel: enrichModel,
-		questionModel: "gemini-3.1-pro-preview", markModel: "gemini-2.5-flash",
+		questionModel: "gemini-3.1-pro-preview", markModel: flashModels[0],
 		http: &http.Client{
 			Timeout:   15 * time.Second,
 			Transport: publicOnlyTransport(),
@@ -132,11 +132,14 @@ func (g *geminiAI) generateWith(ctx context.Context, model, system string, parts
 	var err error
 	for attempt := 0; attempt < 4; attempt++ {
 		resp, err = g.call(ctx, model, parts, cfg)
-		if err != nil && noQuota(err) && model != g.digestModel {
-			// The key's plan has no quota at all for this model (the free tier
-			// allows no Pro models): use the reading model (Flash) instead
-			slog.Warn("gemini model not available on this plan, using fallback", "model", model, "fallback", g.digestModel)
-			model = g.digestModel
+		// No key may use this model (free plans allow no Pro models; older
+		// models are closed to new projects): the next flash model
+		for _, next := range modelChain(model)[1:] {
+			if err == nil || !nextModel(err) {
+				break
+			}
+			slog.Warn("gemini model not available to any key, using fallback", "model", model, "fallback", next)
+			model = next
 			u.Model = model
 			resp, err = g.call(ctx, model, parts, cfg)
 		}

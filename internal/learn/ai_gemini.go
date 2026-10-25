@@ -3,6 +3,7 @@ package learn
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -49,6 +50,37 @@ func clock(sec int) string {
 var geminiPrices = map[string][2]float64{
 	"gemini-2.5-flash":      {0.30, 2.50},
 	"gemini-2.5-flash-lite": {0.10, 0.40},
+	// Estimates (per million tokens) so the creators' allowance counts them
+	"gemini-3.8-flash":      {0.50, 3.00},
+	"gemini-3.5-flash":      {0.50, 3.00},
+	"gemini-3.1-flash-lite": {0.25, 1.50},
+}
+
+// flashModels: the reading model first, then the ones to try when a key's
+// project may not use it (Google closes older models to new projects).
+var flashModels = []string{"gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-3.1-flash-lite"}
+
+// modelChain is model followed by the flash models not already in it.
+func modelChain(model string) []string {
+	out := []string{model}
+	for _, m := range flashModels {
+		if m != model {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// nextModel: try the next model (each model has its own quota).
+func nextModel(err error) bool {
+	return modelUnavailable(err) || errors.Is(err, ErrAllKeysResting)
+}
+
+// modelUnavailable: this key's project may not use the model at all
+// ("no longer available to new users", not found, or a quota of 0).
+func modelUnavailable(err error) bool {
+	s := err.Error()
+	return noQuota(err) || (strings.Contains(s, "404") && (strings.Contains(s, "no longer available") || strings.Contains(s, "NOT_FOUND")))
 }
 
 type geminiVideoAI struct {
@@ -66,8 +98,8 @@ func NewGeminiVideoAI(ctx context.Context, keys []string, model string) (VideoAI
 	if err != nil || pool == nil {
 		return nil, err
 	}
-	if model == "" {
-		model = "gemini-2.5-flash"
+	if model == "" || model == "gemini-2.5-flash" {
+		model = flashModels[0]
 	}
 	return &geminiVideoAI{pool: pool, model: model}, nil
 }
@@ -143,13 +175,20 @@ func (g *geminiVideoAI) watch(ctx context.Context, youtubeID, title, note string
 	var err error
 	// Gemini's free tier often answers 429/503 under load: back off and retry
 	for attempt := 0; attempt < 4; attempt++ {
-		err = g.pool.do(g.model, func(k *poolKey) error {
-			var err error
-			resp, err = k.client.Models.GenerateContent(ctx, g.model,
-				[]*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
-			recordGemini(g.record, k, g.model, resp, err)
-			return err
-		})
+		// The first model every key may use
+		for _, model := range modelChain(g.model) {
+			err = g.pool.do(model, func(k *poolKey) error {
+				var err error
+				resp, err = k.client.Models.GenerateContent(ctx, model,
+					[]*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
+				recordGemini(g.record, k, model, resp, err)
+				return err
+			})
+			u.Model = model
+			if err == nil || !nextModel(err) {
+				break
+			}
+		}
 		if err == nil || !retryableGemini(err) || ctx.Err() != nil {
 			break
 		}
@@ -164,7 +203,7 @@ func (g *geminiVideoAI) watch(ctx context.Context, youtubeID, title, note string
 	if m := resp.UsageMetadata; m != nil {
 		u.InputTokens = int64(m.PromptTokenCount)
 		u.OutputTokens = int64(m.CandidatesTokenCount + m.ThoughtsTokenCount)
-		if p, ok := geminiPrices[g.model]; ok {
+		if p, ok := geminiPrices[u.Model]; ok {
 			u.CostMicroUSD = int64(float64(u.InputTokens)*p[0] + float64(u.OutputTokens)*p[1])
 		}
 	}

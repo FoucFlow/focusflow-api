@@ -53,3 +53,33 @@ func TestPoolMovesTheRequestToTheNextKey(t *testing.T) {
 		t.Fatal("a daily limit is not retried")
 	}
 }
+
+func TestClosedModelMovesToTheNextKeyAndModel(t *testing.T) {
+	gone := errors.New("Error 404, Message: This model models/gemini-2.5-flash is no longer available to new users. Status: NOT_FOUND")
+	if !modelUnavailable(gone) || !nextModel(gone) || modelUnavailable(errors.New("Error 400: bad")) {
+		t.Fatal("a model closed to new projects is unavailable")
+	}
+	if c := modelChain("gemini-3.1-pro-preview"); c[0] != "gemini-3.1-pro-preview" || c[1] != flashModels[0] || len(c) != len(flashModels)+1 {
+		t.Fatalf("chain: %v", c)
+	}
+	if c := modelChain(flashModels[0]); len(c) != len(flashModels) {
+		t.Fatalf("no repeats: %v", c)
+	}
+	p, _ := geminiPoolFor(context.Background(), []string{"g-one", "g-two"})
+	now := time.Date(2026, 10, 25, 17, 0, 0, 0, time.UTC)
+	p.now = func() time.Time { return now }
+	var used []string
+	err := p.do("gemini-2.5-flash", func(k *poolKey) error {
+		used = append(used, k.name)
+		if k.name == "key 1" {
+			return gone
+		}
+		return nil
+	})
+	if err != nil || len(used) != 2 {
+		t.Fatalf("key 1 may not use the model → key 2: %v %v", err, used)
+	}
+	if got := p.keys[0].rest["gemini-2.5-flash"]; !got.Equal(now.AddDate(0, 0, 7)) {
+		t.Fatalf("closed model: key rests a week, got %v", got)
+	}
+}

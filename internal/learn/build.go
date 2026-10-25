@@ -1,6 +1,7 @@
 package learn
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -86,6 +87,25 @@ func (s *Service) pauseReading(m *Material) {
 		"error": "Paused (" + where + ") to keep some of your AI allowance for organising. The rest is read automatically when your allowance refills, or press Continue."})
 }
 
+const (
+	aiBusyMessage  = "The AI has reached its limit for now. This is read automatically as soon as it is available again (at the latest after 07:00 UTC)."
+	aiBusyOrganise = "The AI has reached its limit for now. Your course is organised automatically as soon as it is available again (at the latest after 07:00 UTC)."
+)
+
+// waitForAI: every AI key is over its quota. The material waits (nothing is
+// lost) and resumePaused continues it; false for any other error.
+func (s *Service) waitForAI(m *Material, err error) bool {
+	if !errors.Is(err, ErrAllKeysResting) {
+		return false
+	}
+	if m.ReadPages == 0 && m.ReadSeconds == 0 {
+		s.db.Model(m).Updates(map[string]any{"status": StatusPaused, "reading": false, "error": aiBusyMessage})
+	} else {
+		s.db.Model(m).Updates(map[string]any{"status": StatusReady, "reading": false, "paused": true, "error": aiBusyMessage})
+	}
+	return true
+}
+
 // resumeLoop continues paused materials whose creators have allowance again.
 func (s *Service) resumeLoop() {
 	for range time.Tick(10 * time.Minute) {
@@ -94,6 +114,15 @@ func (s *Service) resumeLoop() {
 }
 
 func (s *Service) resumePaused() {
+	// Courses whose organising waited for the AI
+	var waiting []coursemodels.Course
+	s.db.Where("organise_status = ? AND organise_error = ?", StatusFailed, aiBusyOrganise).Limit(20).Find(&waiting)
+	for i := range waiting {
+		if err := s.StartOrganise(&waiting[i]); err != nil {
+			slog.Info("organise still waiting", "course", *waiting[i].CourseId, "reason", err.Error())
+		}
+	}
+
 	var mats []Material
 	s.db.Where("(paused AND status = ?) OR status = ?", StatusReady, StatusPaused).Order("id").Limit(50).Find(&mats)
 	ok := map[int]bool{}
