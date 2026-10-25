@@ -3,6 +3,7 @@ package learn
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -82,29 +83,40 @@ func (s *Service) extend(courseID, ownerID int) {
 		return
 	}
 
+	// New units are saved one by one as they are written, after the last one
+	var maxPos int
+	s.db.Model(&Unit{}).Where("course_id = ?", courseID).Select("COALESCE(MAX(position), 0)").Scan(&maxPos)
+	saver := s.newUnitSaver(courseID, maxPos, refs)
+	in.OnUnit = saver.add
+
 	started := time.Now()
 	outline, usage, err := s.ai.Organise(context.Background(), in)
 	s.logUsage("organise_more", courseID, ownerID, usage, started, err)
 	if err == nil && len(outline.Units) == 0 {
 		err = errors.New("the AI proposed no units")
 	}
+	if err == nil && saver.saved() < len(outline.Units) {
+		err = fmt.Errorf("only %d of %d units saved: %v", saver.saved(), len(outline.Units), saver.err)
+	}
+	if err != nil && saver.saved() > 0 {
+		s.markRefsOrganised(saver.cited)
+		done(partialMessage)
+		if s.refs != nil {
+			if c, err := s.course(courseID); err == nil {
+				_ = s.startReferences(c, true)
+			}
+		}
+		return
+	}
 	if err != nil {
 		slog.Warn("adding units failed", "course", courseID, "error", err)
 		msg := "The AI could not add units for the pages read later. It tries again when more pages are read; or press Organise to redo the whole course."
 		if errors.Is(err, ErrAICredit) {
 			msg = creditMessage
+		} else if errors.Is(err, ErrAllKeysResting) {
+			msg = partialMessage // resumePaused tries again
 		}
 		done(msg)
-		return
-	}
-	err = s.db.Transaction(func(tx *gorm.DB) error {
-		var maxPos int
-		tx.Model(&Unit{}).Where("course_id = ?", courseID).Select("COALESCE(MAX(position), 0)").Scan(&maxPos)
-		return saveUnits(tx, courseID, maxPos, outline, refs)
-	})
-	if err != nil {
-		slog.Error("save added units", "course", courseID, "error", err)
-		done("Could not save the new units. They will be tried again when more pages are read.")
 		return
 	}
 	s.markOrganised(taken)

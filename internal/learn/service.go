@@ -735,7 +735,7 @@ func (s *Service) failMaterial(m *Material, msg string) {
 
 // StartOrganise checks the rules and queues the AI run.
 func (s *Service) StartOrganise(c *coursemodels.Course) error {
-	if c.CourseStatus == "published" {
+	if c.CourseStatus == "published" && len(s.units(*c.CourseId)) > 0 {
 		return errors.New("Unpublish the course before organising it again (learners' progress depends on its units).")
 	}
 	if c.OrganiseStatus == StatusProcessing {
@@ -777,12 +777,28 @@ func (s *Service) organise(courseID, ownerID int) {
 	s.db.Where("course_id = ? AND status = ?", courseID, StatusReady).Order("id").Find(&mats)
 	in, refs, taken := organiseInput(c, mats, false)
 	in.Progress = s.organiseProgress(courseID)
+	// First build: each unit is saved as soon as it is written
+	var saver *unitSaver
+	if len(s.units(courseID)) == 0 {
+		saver = s.newUnitSaver(courseID, 0, refs)
+		in.OnUnit = saver.add
+	}
 
 	started := time.Now()
 	outline, usage, err := s.ai.Organise(context.Background(), in)
 	s.logUsage("organise", courseID, ownerID, usage, started, err)
 	if err == nil && len(outline.Units) == 0 {
 		err = errors.New("the AI proposed no units")
+	}
+	if err == nil && saver != nil && saver.saved() < len(outline.Units) {
+		err = fmt.Errorf("only %d of %d units saved: %v", saver.saved(), len(outline.Units), saver.err)
+	}
+	if err != nil && saver != nil && saver.saved() > 0 {
+		// Keep the units already written; the rest is added later
+		slog.Warn("organise stopped part way", "course", courseID, "saved", saver.saved(), "error", err)
+		s.markRefsOrganised(saver.cited)
+		s.organiseDone(courseID, ownerID, partialMessage)
+		return
 	}
 	if err != nil {
 		slog.Warn("organise failed", "course", courseID, "error", err)
@@ -799,19 +815,16 @@ func (s *Service) organise(courseID, ownerID int) {
 			"organise_status": StatusFailed, "organise_error": msg, "organise_runs": gorm.Expr("GREATEST(organise_runs - 1, 0)")})
 		return
 	}
+	if saver != nil {
+		s.markOrganised(taken)
+		s.organiseDone(courseID, ownerID, "")
+		return
+	}
 	err = s.db.Transaction(func(tx *gorm.DB) error {
 		if err := s.deleteUnits(tx, courseID); err != nil {
 			return err
 		}
-		if err := saveUnits(tx, courseID, 0, outline, refs); err != nil {
-			return err
-		}
-		done := map[string]any{"organise_status": StatusReady, "organise_error": ""}
-		if s.refs != nil {
-			// References start in the same step, so the course never looks finished in between
-			done["references_status"], done["references_done"], done["references_total"] = StatusProcessing, 0, 0
-		}
-		return tx.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).Updates(done).Error
+		return saveUnits(tx, courseID, 0, outline, refs)
 	})
 	if err != nil {
 		slog.Error("save organised units", "course", courseID, "error", err)
@@ -820,12 +833,24 @@ func (s *Service) organise(courseID, ownerID int) {
 		return
 	}
 	s.markOrganised(taken)
-	// New units: look for "expand your knowledge" references in the background
+	s.organiseDone(courseID, ownerID, "")
+}
+
+// organiseDone ends a run with new units: references are searched for them
+// (started in the same update, so the course never looks finished in
+// between) and pages read meanwhile get units of their own.
+func (s *Service) organiseDone(courseID, ownerID int, msg string) {
+	done := map[string]any{"organise_status": StatusReady, "organise_error": msg}
+	if s.refs != nil {
+		done["references_status"], done["references_done"], done["references_total"] = StatusProcessing, 0, 0
+	}
+	s.db.Model(&coursemodels.Course{}).Where("course_id = ?", courseID).Updates(done)
 	if s.refs != nil {
 		s.enqueue(func() { s.findReferences(courseID, ownerID, false) })
 	}
-	// Pages read while organising get units of their own
-	s.maybeExtend(courseID)
+	if msg == "" {
+		s.maybeExtend(courseID)
+	}
 }
 
 // saveUnits creates the outline's units from position start+1 on, with

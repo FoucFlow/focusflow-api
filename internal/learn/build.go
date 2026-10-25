@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	coursemodels "focusflow-api/internal/course/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // The course builds itself in the background: each material's first short
@@ -32,7 +34,7 @@ func (s *Service) afterRead(courseID int) {
 	}
 	// Never organised: do it now. StartOrganise waits for materials still
 	// being read and checks the allowance.
-	if c.OrganiseRuns > 0 || c.OrganiseStatus == StatusProcessing || c.CourseStatus == "published" {
+	if c.OrganiseRuns > 0 || c.OrganiseStatus == StatusProcessing {
 		return
 	}
 	if err := s.StartOrganise(c); err != nil {
@@ -108,7 +110,7 @@ func (s *Service) waitForAI(m *Material, err error) bool {
 
 // resumeLoop continues paused materials whose creators have allowance again.
 func (s *Service) resumeLoop() {
-	for range time.Tick(10 * time.Minute) {
+	for range time.Tick(3 * time.Minute) {
 		s.resumePaused()
 	}
 }
@@ -121,6 +123,12 @@ func (s *Service) resumePaused() {
 		if err := s.StartOrganise(&waiting[i]); err != nil {
 			slog.Info("organise still waiting", "course", *waiting[i].CourseId, "reason", err.Error())
 		}
+	}
+	// Courses with some units, the rest still to write
+	var partial []coursemodels.Course
+	s.db.Where("organise_status = ? AND organise_error = ?", StatusReady, partialMessage).Limit(20).Find(&partial)
+	for _, c := range partial {
+		s.maybeExtend(*c.CourseId)
 	}
 
 	var mats []Material
@@ -224,7 +232,11 @@ func (s *Service) moreComing(courseID int) bool {
 	var n int64
 	s.db.Model(&Material{}).Where("course_id = ? AND (reading OR paused OR status IN ?)", courseID,
 		[]string{StatusProcessing, StatusPaused}).Count(&n)
-	return n > 0
+	if n > 0 {
+		return true
+	}
+	c, err := s.course(courseID)
+	return err == nil && (c.OrganiseStatus == StatusProcessing || c.OrganiseError == partialMessage || c.OrganiseError == aiBusyOrganise)
 }
 
 // courseProgress loads what buildProgress needs.
@@ -240,8 +252,89 @@ func (s *Service) courseProgress(c *coursemodels.Course) *BuildProgress {
 	for _, m := range mats {
 		anyReady = anyReady || m.Status == StatusReady
 	}
-	if p != nil && p.Stage == "waiting" && anyReady && c.OrganiseRuns == 0 && c.CourseStatus != "published" && s.UserAllowance(c.UserId).CanUseAI {
+	if p != nil && p.Stage == "waiting" && anyReady && c.OrganiseRuns == 0 && s.UserAllowance(c.UserId).CanUseAI {
 		p.Active, p.Stage, p.Label = true, "organising", "Starting to organise your units"
 	}
 	return p
+}
+
+// unitSaver saves units as the AI writes them, so a course (even a published
+// one) shows each unit as soon as it is ready. Units are saved in plan order:
+// one written early waits until those before it are saved.
+type unitSaver struct {
+	s        *Service
+	courseID int
+	start    int // units go to positions start+1, start+2, ...
+	refs     map[string]ConceptSource
+	mu       sync.Mutex
+	pending  map[int]OutlineUnit
+	next     int
+	cited    []string // concept refs in saved units ("M12-C3")
+	err      error
+}
+
+func (s *Service) newUnitSaver(courseID, start int, refs map[string]ConceptSource) *unitSaver {
+	return &unitSaver{s: s, courseID: courseID, start: start, refs: refs, pending: map[int]OutlineUnit{}}
+}
+
+func (u *unitSaver) add(i int, ou OutlineUnit) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.pending[i] = ou
+	for u.err == nil {
+		ou, ok := u.pending[u.next]
+		if !ok {
+			return
+		}
+		delete(u.pending, u.next)
+		u.err = u.s.db.Transaction(func(tx *gorm.DB) error {
+			return saveUnits(tx, u.courseID, u.start+u.next, Outline{Units: []OutlineUnit{ou}}, u.refs)
+		})
+		if u.err != nil {
+			slog.Error("save unit", "course", u.courseID, "error", u.err)
+			return
+		}
+		for _, oc := range ou.Concepts {
+			u.cited = append(u.cited, oc.Sources...)
+		}
+		u.next++
+	}
+}
+
+func (u *unitSaver) saved() int {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.next
+}
+
+const partialMessage = "Some units are ready; the AI adds the rest as soon as it is available again."
+
+// markRefsOrganised flags the concepts the saved units cover ("M12-C3"), so
+// only the others are planned again.
+func (s *Service) markRefsOrganised(refs []string) {
+	byMat := map[int]map[int]bool{}
+	for _, r := range refs {
+		var mid, ci int
+		if _, err := fmt.Sscanf(r, "M%d-C%d", &mid, &ci); err != nil || ci < 1 {
+			continue
+		}
+		if byMat[mid] == nil {
+			byMat[mid] = map[int]bool{}
+		}
+		byMat[mid][ci-1] = true
+	}
+	for mid, idx := range byMat {
+		_ = s.db.Transaction(func(tx *gorm.DB) error {
+			var m Material
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&m, mid).Error; err != nil {
+				return err
+			}
+			for i := range m.Digest.Concepts {
+				if idx[i] {
+					m.Digest.Concepts[i].Organised = true
+				}
+			}
+			return tx.Model(&m).Select("digest").Updates(&m).Error
+		})
+	}
 }

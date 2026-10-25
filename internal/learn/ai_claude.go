@@ -323,6 +323,7 @@ func (a *claudeAI) Organise(ctx context.Context, in OrganiseInput) (Outline, Usa
 				return
 			}
 			plan.Units[i].Concepts = written
+			in.unit(i, plan.Units[i])
 			done++
 			in.report(done, len(plan.Units))
 		}(i)

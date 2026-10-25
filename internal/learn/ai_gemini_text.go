@@ -143,7 +143,7 @@ func (g *geminiAI) generateWith(ctx context.Context, model, system string, parts
 			u.Model = model
 			resp, err = g.call(ctx, model, parts, cfg)
 		}
-		if err == nil || !retryableGemini(err) || errors.Is(err, ErrAllKeysResting) || ctx.Err() != nil {
+		if err == nil || !retryableGemini(err) || (errors.Is(err, ErrAllKeysResting) && !overloaded(err)) || ctx.Err() != nil {
 			break
 		}
 		select {
@@ -259,6 +259,7 @@ func (g *geminiAI) Organise(ctx context.Context, in OrganiseInput) (Outline, Usa
 				return
 			}
 			plan.Units[i].Concepts = written
+			in.unit(i, plan.Units[i])
 			done++
 			in.report(done, len(plan.Units))
 		}(i)

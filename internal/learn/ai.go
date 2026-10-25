@@ -112,6 +112,14 @@ type OrganiseInput struct {
 	// Progress is told how many units are written of how many planned
 	// (0 of n once the plan is made). Optional.
 	Progress func(done, total int) `json:"-"`
+	// OnUnit is given each unit (index in the plan) as soon as it is written. Optional.
+	OnUnit func(i int, u OutlineUnit) `json:"-"`
+}
+
+func (in OrganiseInput) unit(i int, u OutlineUnit) {
+	if in.OnUnit != nil {
+		in.OnUnit(i, u)
+	}
 }
 
 func (in OrganiseInput) report(done, total int) {
@@ -258,8 +266,10 @@ func (FakeAI) Organise(_ context.Context, in OrganiseInput) (Outline, Usage, err
 		}
 		o.Units = append(o.Units, u)
 	}
-	for i := 0; i <= len(o.Units); i++ {
-		in.report(i, len(o.Units))
+	in.report(0, len(o.Units))
+	for i := range o.Units {
+		in.unit(i, o.Units[i])
+		in.report(i+1, len(o.Units))
 	}
 	return o, fakeUsage, nil
 }

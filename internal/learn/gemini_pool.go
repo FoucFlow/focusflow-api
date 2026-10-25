@@ -131,7 +131,7 @@ func (p *geminiPool) do(model string, fn func(k *poolKey) error) error {
 		err := fn(k)
 		if err != nil && overloaded(err) {
 			// Busy for everyone: skip this model for a few minutes on every key
-			p.restAll(model, p.now().Add(3*time.Minute))
+			p.restAll(model, p.now().Add(30*time.Second))
 			return fmt.Errorf("%w (%s overloaded): %v", ErrAllKeysResting, model, err)
 		}
 		if err == nil || !(quotaError(err) || modelUnavailable(err)) {

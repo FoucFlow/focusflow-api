@@ -635,8 +635,10 @@ func (h *Handler) Publish(c *gin.Context) {
 		fail(c, http.StatusUnprocessableEntity, "visibility must be public or private.")
 		return
 	}
-	if len(h.s.units(*course.CourseId)) == 0 {
-		fail(c, http.StatusUnprocessableEntity, "Add at least one unit before publishing.")
+	// A course may be published while the AI is still writing its units
+	// (learners see them as they appear), but not with nothing in it
+	if len(h.s.units(*course.CourseId)) == 0 && h.s.materialCount(*course.CourseId) == 0 {
+		fail(c, http.StatusUnprocessableEntity, "Add a material or a unit before publishing.")
 		return
 	}
 	if in.Visibility == "public" && !in.ConfirmRights {

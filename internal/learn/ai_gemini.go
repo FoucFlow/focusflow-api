@@ -207,7 +207,7 @@ func (g *geminiVideoAI) watch(ctx context.Context, youtubeID, title, note string
 				break
 			}
 		}
-		if err == nil || !retryableGemini(err) || errors.Is(err, ErrAllKeysResting) || ctx.Err() != nil {
+		if err == nil || !retryableGemini(err) || (errors.Is(err, ErrAllKeysResting) && !overloaded(err)) || ctx.Err() != nil {
 			break
 		}
 		select {
