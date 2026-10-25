@@ -35,6 +35,8 @@ func (h *Handler) Routes(r *gin.Engine) {
 	g.POST("/courses/:id/publish", h.Publish)
 	g.POST("/courses/:id/unpublish", h.Unpublish)
 
+	g.PUT("/courses/:id/materials/order", h.ReorderMaterials)
+	g.PUT("/materials/:mid", h.RenameMaterial)
 	g.DELETE("/materials/:mid", h.DeleteMaterial)
 	g.POST("/materials/:mid/retry", h.RetryMaterial)
 

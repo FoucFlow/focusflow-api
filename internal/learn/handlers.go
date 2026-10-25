@@ -313,7 +313,7 @@ func (h *Handler) ListMaterials(c *gin.Context) {
 		return
 	}
 	mats := []Material{}
-	h.s.db.Where("course_id = ?", *course.CourseId).Order("id").Find(&mats)
+	h.s.db.Where("course_id = ?", *course.CourseId).Order(materialOrder).Find(&mats)
 	c.JSON(http.StatusOK, gin.H{"data": mats})
 }
 
@@ -333,6 +333,71 @@ func (h *Handler) ownedMaterial(c *gin.Context) (*Material, bool) {
 		return nil, false
 	}
 	return &m, true
+}
+
+// PUT /api/learn/materials/:mid {title}
+func (h *Handler) RenameMaterial(c *gin.Context) {
+	m, ok := h.ownedMaterial(c)
+	if !ok {
+		return
+	}
+	var in struct {
+		Title string `json:"title"`
+	}
+	_ = c.ShouldBindJSON(&in)
+	title := strings.TrimSpace(in.Title)
+	if title == "" {
+		fail(c, http.StatusUnprocessableEntity, "A material needs a name.")
+		return
+	}
+	m.Title = clip(title, 255)
+	if err := h.s.db.Model(m).Update("title", m.Title).Error; err != nil {
+		fail(c, http.StatusInternalServerError, "Could not rename the material.")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": m})
+}
+
+// PUT /api/learn/courses/:id/materials/order {material_ids: [...]}: every
+// material of the course, in the new order.
+func (h *Handler) ReorderMaterials(c *gin.Context) {
+	course, ok := h.ownedCourse(c)
+	if !ok {
+		return
+	}
+	var in struct {
+		MaterialIDs []int `json:"material_ids"`
+	}
+	_ = c.ShouldBindJSON(&in)
+	var ids []int
+	h.s.db.Model(&Material{}).Where("course_id = ?", *course.CourseId).Pluck("id", &ids)
+	belongs := map[int]bool{}
+	for _, id := range ids {
+		belongs[id] = true
+	}
+	if len(in.MaterialIDs) != len(ids) {
+		fail(c, http.StatusUnprocessableEntity, "Send every material id of the course, in the new order.")
+		return
+	}
+	err := h.s.db.Transaction(func(tx *gorm.DB) error {
+		for i, id := range in.MaterialIDs {
+			if !belongs[id] {
+				return errors.New("Unknown material id.")
+			}
+			delete(belongs, id)
+			if err := tx.Model(&Material{}).Where("id = ?", id).Update("position", i+1).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		fail(c, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	mats := []Material{}
+	h.s.db.Where("course_id = ?", *course.CourseId).Order(materialOrder).Find(&mats)
+	c.JSON(http.StatusOK, gin.H{"data": mats})
 }
 
 // DELETE /api/learn/materials/:mid
@@ -407,7 +472,7 @@ func (h *Handler) GetCourse(c *gin.Context) {
 
 	if course.UserId == me || isAdmin(c) {
 		mats := []Material{}
-		h.s.db.Where("course_id = ?", id).Order("id").Find(&mats)
+		h.s.db.Where("course_id = ?", id).Order(materialOrder).Find(&mats)
 		byUnit := h.s.unitMaterials(ids)
 		concepts := h.s.unitConcepts(ids)
 		tests := h.s.testSummaries(ids, true, me)

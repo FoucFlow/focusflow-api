@@ -779,7 +779,7 @@ func (s *Service) organise(courseID, ownerID int) {
 		return
 	}
 	var mats []Material
-	s.db.Where("course_id = ? AND status = ?", courseID, StatusReady).Order("id").Find(&mats)
+	s.db.Where("course_id = ? AND status = ?", courseID, StatusReady).Order(materialOrder).Find(&mats)
 	in, refs, taken := organiseInput(c, mats, false)
 	in.Progress = s.organiseProgress(courseID)
 	// First build: each unit is saved as soon as it is written

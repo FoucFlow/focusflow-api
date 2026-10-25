@@ -45,6 +45,18 @@ t "upload .pptx" 201 "${A[@]}" -F "file=@$D/slides.pptx" $B/api/learn/courses/$C
 t "add YouTube video" 201 "${A[@]}" "${J[@]}" -d '{"kind":"video","url":"https://youtu.be/dQw4w9WgXcQ","title":"Intro video"}' $B/api/learn/courses/$CID/materials
 check "  video id parsed, being watched by the video AI" "d['data']['youtube_id']=='dQw4w9WgXcQ' and d['data']['status'] in ('processing','ready')"
 t "add web link" 201 "${A[@]}" "${J[@]}" -d '{"kind":"link","url":"https://go.dev/tour","title":"Go tour","note":"Official interactive tour"}' $B/api/learn/courses/$CID/materials
+t "materials in upload order" 200 "${A[@]}" $B/api/learn/courses/$CID/materials
+check "  positions 1..4" "[m['position'] for m in d['data']]==[1,2,3,4]"
+MIDS=$(py "','.join(str(m['id']) for m in d['data'])"); FIRST=${MIDS%%,*}; REV=$(py "','.join(str(m['id']) for m in reversed(d['data']))")
+t "rename a material" 200 "${A[@]}" "${J[@]}" -X PUT -d '{"title":"  Week 1 notes  "}' $B/api/learn/materials/$FIRST
+check "  name trimmed" "d['data']['title']=='Week 1 notes'"
+t "a material needs a name" 422 "${A[@]}" "${J[@]}" -X PUT -d '{"title":"  "}' $B/api/learn/materials/$FIRST
+t "bob cannot rename it" 403 "${Bo[@]}" "${J[@]}" -X PUT -d '{"title":"x"}' $B/api/learn/materials/$FIRST
+t "reorder materials" 200 "${A[@]}" "${J[@]}" -X PUT -d "{\"material_ids\":[$REV]}" $B/api/learn/courses/$CID/materials/order
+check "  new order kept" "','.join(str(m['id']) for m in d['data'])=='$REV'"
+t "reorder needs every material" 422 "${A[@]}" "${J[@]}" -X PUT -d "{\"material_ids\":[$FIRST]}" $B/api/learn/courses/$CID/materials/order
+t "bob cannot reorder" 403 "${Bo[@]}" "${J[@]}" -X PUT -d "{\"material_ids\":[$REV]}" $B/api/learn/courses/$CID/materials/order
+t "put them back" 200 "${A[@]}" "${J[@]}" -X PUT -d "{\"material_ids\":[$MIDS]}" $B/api/learn/courses/$CID/materials/order
 t "categories" 200 "${A[@]}" $B/api/learn/categories
 check "  8 seeded categories" "len(d['data'])==8"
 t "get a direct-upload token" 200 "${A[@]}" -X POST $B/api/learn/courses/$CID/upload-url

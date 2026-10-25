@@ -3,7 +3,11 @@
 // flow where each unit opens after the previous one is finished.
 package learn
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
 
 // Material kinds (F1.2)
 const (
@@ -31,8 +35,9 @@ type Material struct {
 	OwnerID    int    `json:"owner_id" gorm:"not null;index"`
 	Kind       string `json:"kind" gorm:"size:16;not null"`
 	Title      string `json:"title" gorm:"size:255;not null"`
-	URL        string `json:"url" gorm:"size:2048"` // public file URL or the external link
-	StorageKey string `json:"-" gorm:"size:512"`    // object key in the media bucket (files only)
+	Position   int    `json:"position" gorm:"not null;default:0"` // the creator's order (0 = old rows: by id)
+	URL        string `json:"url" gorm:"size:2048"`               // public file URL or the external link
+	StorageKey string `json:"-" gorm:"size:512"`                  // object key in the media bucket (files only)
 	YouTubeID  string `json:"youtube_id,omitempty" gorm:"size:32"`
 	MimeType   string `json:"mime_type,omitempty" gorm:"size:128"`
 	SizeBytes  int64  `json:"size_bytes,omitempty"`
@@ -167,3 +172,16 @@ func Models() []any {
 	return []any{&Material{}, &Unit{}, &Concept{}, &UnitMaterial{}, &UnitProgress{}, &AIUsage{},
 		&Question{}, &TestSettings{}, &Attempt{}, &MarkChange{}, &AICall{}}
 }
+
+// BeforeCreate puts a new material after the course's others.
+func (m *Material) BeforeCreate(tx *gorm.DB) error {
+	if m.Position == 0 {
+		var max int
+		tx.Model(&Material{}).Where("course_id = ?", m.CourseID).Select("COALESCE(MAX(position), 0)").Scan(&max)
+		m.Position = max + 1
+	}
+	return nil
+}
+
+// materialOrder sorts materials as the creator arranged them.
+const materialOrder = "position, id"

@@ -58,7 +58,7 @@ func (s *Service) extend(courseID, ownerID int) {
 		return
 	}
 	var mats []Material
-	s.db.Where("course_id = ? AND status = ?", courseID, StatusReady).Order("id").Find(&mats)
+	s.db.Where("course_id = ? AND status = ?", courseID, StatusReady).Order(materialOrder).Find(&mats)
 	in, refs, taken := organiseInput(c, mats, true)
 	in.Progress = s.organiseProgress(courseID)
 	if len(in.Materials) == 0 {
