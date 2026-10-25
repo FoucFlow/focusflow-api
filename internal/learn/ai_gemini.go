@@ -71,9 +71,27 @@ func modelChain(model string) []string {
 	return out
 }
 
-// nextModel: try the next model (each model has its own quota).
+// nextModel: try the next model (each model has its own quota and load).
 func nextModel(err error) bool {
-	return modelUnavailable(err) || errors.Is(err, ErrAllKeysResting)
+	return modelUnavailable(err) || overloaded(err) || errors.Is(err, ErrAllKeysResting)
+}
+
+// overloaded: Google has no capacity for this model right now (503 "high
+// demand"). That holds for every key, so the next model is tried at once.
+func overloaded(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "503") || strings.Contains(s, "UNAVAILABLE") || strings.Contains(s, "high demand")
+}
+
+// fastThinking: flash models think briefly (reading and writing lessons need
+// little reasoning, and long thinking makes every step slow).
+func fastThinking(model string, cfg *genai.GenerateContentConfig) *genai.GenerateContentConfig {
+	if cfg.ThinkingConfig != nil || !strings.HasPrefix(model, "gemini-3") || !strings.Contains(model, "flash") {
+		return cfg
+	}
+	c := *cfg
+	c.ThinkingConfig = &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelLow}
+	return &c
 }
 
 // modelUnavailable: this key's project may not use the model at all
@@ -180,7 +198,7 @@ func (g *geminiVideoAI) watch(ctx context.Context, youtubeID, title, note string
 			err = g.pool.do(model, func(k *poolKey) error {
 				var err error
 				resp, err = k.client.Models.GenerateContent(ctx, model,
-					[]*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, cfg)
+					[]*genai.Content{genai.NewContentFromParts(parts, genai.RoleUser)}, fastThinking(model, cfg))
 				recordGemini(g.record, k, model, resp, err)
 				return err
 			})
@@ -189,7 +207,7 @@ func (g *geminiVideoAI) watch(ctx context.Context, youtubeID, title, note string
 				break
 			}
 		}
-		if err == nil || !retryableGemini(err) || ctx.Err() != nil {
+		if err == nil || !retryableGemini(err) || errors.Is(err, ErrAllKeysResting) || ctx.Err() != nil {
 			break
 		}
 		select {

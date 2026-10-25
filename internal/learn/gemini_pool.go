@@ -104,6 +104,16 @@ func (p *geminiPool) restKey(k *poolKey, model string, until time.Time) {
 	}
 }
 
+func (p *geminiPool) restAll(model string, until time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, k := range p.keys {
+		if until.After(k.rest[model]) {
+			k.rest[model] = until
+		}
+	}
+}
+
 // do runs fn with one key after another until one is not over its quota.
 // fn's error is returned as is when it is not a quota error.
 func (p *geminiPool) do(model string, fn func(k *poolKey) error) error {
@@ -119,6 +129,11 @@ func (p *geminiPool) do(model string, fn func(k *poolKey) error) error {
 		}
 		tried[k] = true
 		err := fn(k)
+		if err != nil && overloaded(err) {
+			// Busy for everyone: skip this model for a few minutes on every key
+			p.restAll(model, p.now().Add(3*time.Minute))
+			return fmt.Errorf("%w (%s overloaded): %v", ErrAllKeysResting, model, err)
+		}
 		if err == nil || !(quotaError(err) || modelUnavailable(err)) {
 			return err
 		}

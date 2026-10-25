@@ -86,7 +86,7 @@ func (g *geminiAI) call(ctx context.Context, model string, parts partsFor, cfg *
 		if err != nil {
 			return err
 		}
-		resp, err = k.client.Models.GenerateContent(ctx, model, []*genai.Content{genai.NewContentFromParts(ps, genai.RoleUser)}, cfg)
+		resp, err = k.client.Models.GenerateContent(ctx, model, []*genai.Content{genai.NewContentFromParts(ps, genai.RoleUser)}, fastThinking(model, cfg))
 		recordGemini(g.record, k, model, resp, err)
 		return err
 	})
@@ -143,7 +143,7 @@ func (g *geminiAI) generateWith(ctx context.Context, model, system string, parts
 			u.Model = model
 			resp, err = g.call(ctx, model, parts, cfg)
 		}
-		if err == nil || !retryableGemini(err) || ctx.Err() != nil {
+		if err == nil || !retryableGemini(err) || errors.Is(err, ErrAllKeysResting) || ctx.Err() != nil {
 			break
 		}
 		select {
