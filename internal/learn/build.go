@@ -259,52 +259,45 @@ func (s *Service) courseProgress(c *coursemodels.Course) *BuildProgress {
 }
 
 // unitSaver saves units as the AI writes them, so a course (even a published
-// one) shows each unit as soon as it is ready. Units are saved in plan order:
-// one written early waits until those before it are saved.
+// one) shows each unit as soon as it is ready. Each goes to its planned
+// position, so the order is right even when a later unit is written first,
+// and nothing written is lost if the run stops part way.
 type unitSaver struct {
 	s        *Service
 	courseID int
-	start    int // units go to positions start+1, start+2, ...
+	start    int // unit i of the plan goes to position start+i+1
 	refs     map[string]ConceptSource
 	mu       sync.Mutex
-	pending  map[int]OutlineUnit
-	next     int
+	count    int
 	cited    []string // concept refs in saved units ("M12-C3")
 	err      error
 }
 
 func (s *Service) newUnitSaver(courseID, start int, refs map[string]ConceptSource) *unitSaver {
-	return &unitSaver{s: s, courseID: courseID, start: start, refs: refs, pending: map[int]OutlineUnit{}}
+	return &unitSaver{s: s, courseID: courseID, start: start, refs: refs}
 }
 
 func (u *unitSaver) add(i int, ou OutlineUnit) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	u.pending[i] = ou
-	for u.err == nil {
-		ou, ok := u.pending[u.next]
-		if !ok {
-			return
-		}
-		delete(u.pending, u.next)
-		u.err = u.s.db.Transaction(func(tx *gorm.DB) error {
-			return saveUnits(tx, u.courseID, u.start+u.next, Outline{Units: []OutlineUnit{ou}}, u.refs)
-		})
-		if u.err != nil {
-			slog.Error("save unit", "course", u.courseID, "error", u.err)
-			return
-		}
-		for _, oc := range ou.Concepts {
-			u.cited = append(u.cited, oc.Sources...)
-		}
-		u.next++
+	err := u.s.db.Transaction(func(tx *gorm.DB) error {
+		return saveUnits(tx, u.courseID, u.start+i, Outline{Units: []OutlineUnit{ou}}, u.refs)
+	})
+	if err != nil {
+		slog.Error("save unit", "course", u.courseID, "error", err)
+		u.err = err
+		return
 	}
+	for _, oc := range ou.Concepts {
+		u.cited = append(u.cited, oc.Sources...)
+	}
+	u.count++
 }
 
 func (u *unitSaver) saved() int {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.next
+	return u.count
 }
 
 const partialMessage = "Some units are ready; the AI adds the rest as soon as it is available again."
