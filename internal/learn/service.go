@@ -384,6 +384,13 @@ func (s *Service) AddFile(ctx context.Context, c *coursemodels.Course, ownerID i
 	}
 	m.URL, m.StorageKey = url, key
 	s.db.Model(m).Updates(map[string]any{"url": url, "storage_key": key})
+	if kind == KindSlides {
+		// Pages for "slides as written" (F3.1). Not fatal: they are built
+		// again from the stored file when first asked for.
+		if _, err := s.buildSlidePages(ctx, m, data); err != nil {
+			slog.Warn("slide pages not built", "material", m.ID, "error", err)
+		}
+	}
 
 	id := m.ID
 	if kind == KindPDF {
@@ -433,14 +440,22 @@ func (s *Service) Retry(m *Material) {
 }
 
 func (s *Service) DeleteMaterial(ctx context.Context, m *Material) error {
+	var pictures []string
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("material_id = ?", m.ID).Delete(&UnitMaterial{}).Error; err != nil {
+			return err
+		}
+		var err error
+		if pictures, err = deleteSlidePages(tx, m.ID); err != nil {
 			return err
 		}
 		return tx.Delete(m).Error
 	})
 	if err == nil {
 		storage.DeleteKey(ctx, m.StorageKey)
+		for _, k := range pictures {
+			storage.DeleteKey(ctx, k)
+		}
 	}
 	return err
 }

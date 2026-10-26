@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -411,6 +412,27 @@ func (h *Handler) DeleteMaterial(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Material deleted."})
+}
+
+// GET /api/learn/materials/:mid/pages: the slides of a PowerPoint material,
+// one page each (F3.1). Creator only for now; learners get pages through
+// their units (F3.7).
+func (h *Handler) SlidePages(c *gin.Context) {
+	m, ok := h.ownedMaterial(c)
+	if !ok {
+		return
+	}
+	if m.Kind != KindSlides {
+		fail(c, http.StatusUnprocessableEntity, "Only PowerPoint materials have slide pages.")
+		return
+	}
+	pages, err := h.s.SlidePages(c.Request.Context(), m)
+	if err != nil {
+		slog.Warn("slide pages", "material", m.ID, "error", err)
+		fail(c, http.StatusUnprocessableEntity, "Could not read the slides of this file.")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"material_id": m.ID, "pages": pages}})
 }
 
 // POST /api/learn/materials/:mid/retry

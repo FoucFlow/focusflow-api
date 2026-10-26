@@ -39,6 +39,7 @@ func (h *Handler) Routes(r *gin.Engine) {
 	g.PUT("/materials/:mid", h.RenameMaterial)
 	g.DELETE("/materials/:mid", h.DeleteMaterial)
 	g.POST("/materials/:mid/retry", h.RetryMaterial)
+	g.GET("/materials/:mid/pages", h.SlidePages)
 
 	g.GET("/units/:uid", h.GetUnit)
 	g.PUT("/units/:uid", h.UpdateUnit)
