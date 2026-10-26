@@ -45,6 +45,7 @@ type SlideRange struct {
 	MaterialID int `json:"material_id"`
 	FirstPage  int `json:"first_page"` // 0 = from the first slide
 	LastPage   int `json:"last_page"`  // 0 = to the last slide
+	Count      int `json:"count"`      // slides learners see (hidden ones left out)
 }
 
 // unitRanges returns, per unit, the slide ranges it reads.
@@ -58,7 +59,16 @@ func (s *Service) unitRanges(unitIDs []int) map[int][]SlideRange {
 		Where("unit_materials.unit_id IN ? AND m.kind = ?", unitIDs, KindSlides).
 		Order("unit_materials.unit_id, unit_materials.position").Find(&links)
 	for _, l := range links {
-		out[l.UnitID] = append(out[l.UnitID], SlideRange{MaterialID: l.MaterialID, FirstPage: l.FirstPage, LastPage: l.LastPage})
+		q := s.db.Model(&SlidePage{}).Where("material_id = ? AND NOT hidden", l.MaterialID)
+		if l.FirstPage > 0 {
+			q = q.Where("number >= ?", l.FirstPage)
+		}
+		if l.LastPage > 0 {
+			q = q.Where("number <= ?", l.LastPage)
+		}
+		var n int64
+		q.Count(&n)
+		out[l.UnitID] = append(out[l.UnitID], SlideRange{MaterialID: l.MaterialID, FirstPage: l.FirstPage, LastPage: l.LastPage, Count: int(n)})
 	}
 	return out
 }

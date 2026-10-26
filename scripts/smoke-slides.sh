@@ -95,6 +95,7 @@ t "publish" 200 "${A[@]}" "${J[@]}" -d '{"visibility":"public","confirm_rights":
 t "kim joins" 200 "${Bo[@]}" -X POST $B/api/learn/courses/$SC/join
 t "learner outline" 200 "${Bo[@]}" $B/api/learn/courses/$SC
 check "  units show their slide ranges" "d['data']['units'][0]['slides'][0]['last_page']==3"
+check "  slide counts leave the hidden slide out" "[u['slides'][0]['count'] for u in d['data']['units']]==[3,4]"
 t "kim reads unit 1" 200 "${Bo[@]}" $B/api/learn/units/$U1/pages
 check "  slides 1-3, no speaker notes" "[p['number'] for p in d['data'][0]['pages']]==[1,2,3] and not any(p.get('notes') for p in d['data'][0]['pages'])"
 check "  original file link for diagrams" "d['data'][0]['url'].startswith('http')"
