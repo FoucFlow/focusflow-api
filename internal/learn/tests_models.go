@@ -62,7 +62,7 @@ type TestSettings struct {
 	QuestionsPerTest int    `json:"questions_per_test" gorm:"not null"`
 	PassMark         int    `json:"pass_mark" gorm:"not null"`          // percent
 	TimeLimitMinutes int    `json:"time_limit_minutes" gorm:"not null"` // 0 = no limit
-	MaxAttempts      int    `json:"max_attempts" gorm:"not null"`        // 0 = unlimited
+	MaxAttempts      int    `json:"max_attempts" gorm:"not null"`       // 0 = unlimited
 	TeacherReview    bool   `json:"teacher_review"`
 	TrackTab         bool   `json:"track_tab"`   // leaving the tab or fullscreen
 	TrackPaste       bool   `json:"track_paste"` // copy/paste blocked and logged
@@ -71,10 +71,10 @@ type TestSettings struct {
 	PoolRuns         int    `json:"pool_runs" gorm:"not null;default:0"`
 	// Restriction level (F2.12): practice | standard | strict | supervised | custom
 	Level          string     `json:"level" gorm:"size:16;not null;default:standard"`
-	Practice       bool       `json:"practice"`                                                  // does not block the next unit
+	Practice       bool       `json:"practice"`                                                   // does not block the next unit
 	ShowAnswers    string     `json:"show_answers" gorm:"size:16;not null;default:when_finished"` // after_question | when_finished | after_submit | after_close | never
-	AllOnOnePage   bool       `json:"all_on_one_page"`                                           // else one question per screen
-	NoBack         bool       `json:"no_back"`                                                   // cannot go back to earlier questions
+	AllOnOnePage   bool       `json:"all_on_one_page"`                                            // else one question per screen
+	NoBack         bool       `json:"no_back"`                                                    // cannot go back to earlier questions
 	OpensAt        *time.Time `json:"opens_at"`
 	ClosesAt       *time.Time `json:"closes_at"`
 	AccessCode     string     `json:"access_code,omitempty" gorm:"size:32"` // supervised: given out in the room
