@@ -469,6 +469,7 @@ type unitView struct {
 	Locked       bool          `json:"locked"`
 	Completed    bool          `json:"completed"`
 	Materials    []Material    `json:"materials,omitempty"`
+	Slides       []SlideRange  `json:"slides,omitempty"` // slides as written: ranges this unit reads
 	Concepts     []conceptView `json:"concepts,omitempty"`
 	ConceptNames []string      `json:"concept_names,omitempty"` // learner outline
 	Test         *testSummary  `json:"test,omitempty"`
@@ -498,9 +499,10 @@ func (h *Handler) GetCourse(c *gin.Context) {
 		byUnit := h.s.unitMaterials(ids)
 		concepts := h.s.unitConcepts(ids)
 		tests := h.s.testSummaries(ids, true, me)
+		ranges := h.s.unitRanges(ids)
 		views := make([]unitView, len(units))
 		for i, u := range units {
-			views[i] = unitView{Unit: u, Materials: byUnit[u.ID], Concepts: concepts[u.ID], Test: tests[u.ID]}
+			views[i] = unitView{Unit: u, Materials: byUnit[u.ID], Slides: ranges[u.ID], Concepts: concepts[u.ID], Test: tests[u.ID]}
 		}
 		var learners int64
 		h.s.db.Model(&coursemodels.Enrollment{}).Where("course_id = ?", id).Count(&learners)
@@ -521,6 +523,7 @@ func (h *Handler) GetCourse(c *gin.Context) {
 	open := unlocked(units, done)
 	concepts := h.s.unitConcepts(ids)
 	tests := h.s.testSummaries(ids, false, me)
+	ranges := h.s.unitRanges(ids)
 	views := make([]unitView, len(units))
 	for i, u := range units {
 		u.Body = "" // body only through GET /units/:uid
@@ -528,7 +531,7 @@ func (h *Handler) GetCourse(c *gin.Context) {
 		for _, cv := range concepts[u.ID] {
 			names = append(names, cv.Title)
 		}
-		views[i] = unitView{Unit: u, Locked: !enrolled || !open[u.ID], Completed: done[u.ID], ConceptNames: names, Test: tests[u.ID]}
+		views[i] = unitView{Unit: u, Locked: !enrolled || !open[u.ID], Completed: done[u.ID], ConceptNames: names, Slides: ranges[u.ID], Test: tests[u.ID]}
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"role": "learner", "course": course, "units": views, "enrolled": enrolled,
@@ -728,6 +731,10 @@ func (h *Handler) Publish(c *gin.Context) {
 		fail(c, http.StatusUnprocessableEntity, "Add a material or a unit before publishing.")
 		return
 	}
+	if slidesMode(course) && len(h.s.units(*course.CourseId)) == 0 {
+		fail(c, http.StatusUnprocessableEntity, "Cut your slides into units before publishing.")
+		return
+	}
 	if in.Visibility == "public" && !in.ConfirmRights {
 		fail(c, http.StatusUnprocessableEntity, "Confirm that you have the right to share these materials before making the course public.")
 		return
@@ -823,7 +830,7 @@ func (h *Handler) GetUnit(c *gin.Context) {
 		return
 	}
 	me := c.GetInt(auth.CtxUserID)
-	view := unitView{Unit: u, Materials: h.s.unitMaterials([]int{u.ID})[u.ID], Concepts: h.s.unitConcepts([]int{u.ID})[u.ID]}
+	view := unitView{Unit: u, Materials: h.s.unitMaterials([]int{u.ID})[u.ID], Slides: h.s.unitRanges([]int{u.ID})[u.ID], Concepts: h.s.unitConcepts([]int{u.ID})[u.ID]}
 	creator := course.UserId == me || isAdmin(c)
 	view.Test = h.s.testSummaries([]int{u.ID}, creator, me)[u.ID]
 	if creator {

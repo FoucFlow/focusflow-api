@@ -366,7 +366,7 @@ func (s *Service) AddFile(ctx context.Context, c *coursemodels.Course, ownerID i
 		if err != nil {
 			return nil, err
 		}
-		if strings.TrimSpace(text) == "" {
+		if strings.TrimSpace(text) == "" && !slidesMode(c) {
 			return nil, errors.New("these slides contain no text to read (images-only slides are not supported yet)")
 		}
 		m.Text = text
@@ -392,6 +392,10 @@ func (s *Service) AddFile(ctx context.Context, c *coursemodels.Course, ownerID i
 		}
 	}
 
+	if slidesMode(c) {
+		s.markReadyWithoutAI(m) // slides as written: no AI reading
+		return m, nil
+	}
 	id := m.ID
 	if kind == KindPDF {
 		s.enqueue(func() { s.digest(id, data) })
@@ -410,7 +414,7 @@ func (s *Service) AddLink(c *coursemodels.Course, ownerID int, kind, title, url,
 	}
 	m := &Material{CourseID: *c.CourseId, OwnerID: ownerID, Kind: kind, Title: title, URL: url,
 		YouTubeID: youtubeID, Status: StatusReady, Text: note, Digest: Digest{Summary: summary, Topics: []string{}, KeyPoints: []string{}}}
-	if kind == KindVideo && s.videoAI != nil {
+	if kind == KindVideo && s.videoAI != nil && !slidesMode(c) {
 		m.Status = StatusProcessing // Gemini watches it in the background
 	}
 	if err := s.db.Create(m).Error; err != nil {
@@ -467,6 +471,10 @@ func (s *Service) DeleteMaterial(ctx context.Context, m *Material) error {
 func (s *Service) digest(materialID int, data []byte) {
 	var m Material
 	if err := s.db.First(&m, materialID).Error; err != nil {
+		return
+	}
+	if s.courseInSlidesMode(m.CourseID) {
+		s.markReadyWithoutAI(&m) // slides as written: no AI reading
 		return
 	}
 	defer s.afterRead(m.CourseID)
@@ -755,6 +763,9 @@ func (s *Service) failMaterial(m *Material, msg string) {
 
 // StartOrganise checks the rules and queues the AI run.
 func (s *Service) StartOrganise(c *coursemodels.Course) error {
+	if slidesMode(c) {
+		return errSlidesMode
+	}
 	if c.CourseStatus == "published" && len(s.units(*c.CourseId)) > 0 {
 		return errors.New("Unpublish the course before organising it again (learners' progress depends on its units).")
 	}

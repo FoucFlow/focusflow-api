@@ -103,6 +103,10 @@ func (cc *CourseService) CreateCourse(c *gin.Context) {
 		CourseProgress:    progress,
 		CourseLanguage:    c.DefaultPostForm("course_language", "en"),
 		CourseStatus:      "draft", // published through /api/learn/courses/:id/publish
+		BuildMode:         "ai",
+	}
+	if c.PostForm("build_mode") == "slides" {
+		newCourse.BuildMode = "slides"
 	}
 
 	// 5. Save to PostgreSQL (Supabase)

@@ -17,11 +17,11 @@ t() {
 py() { python3 -c "import json,sys; d=json.load(open('$D/out')); print($1)"; }
 check() { if python3 -c "import json,sys; d=json.load(open('$D/out')); sys.exit(0 if ($2) else 1)"; then pass=$((pass+1)); printf "ok   %s\n" "$1"; else failn=$((failn+1)); printf "FAIL %s: %s\n" "$1" "$(head -c 300 "$D/out")"; fi; }
 J=(-H "Content-Type: application/json")
-A=(-b "$D/a" -c "$D/a"); Bo=(-b "$D/b" -c "$D/b")
+A=(-b "$D/a" -c "$D/a"); Bo=(-b "$D/b" -c "$D/b"); C=(-b "$D/c" -c "$D/c")
 printf '%%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%%%EOF\n' > "$D/notes.pdf"
 
 RUN=$(date +%s)
-for u in a:sam b:kim; do
+for u in a:sam b:kim c:lee; do
   jar=${u%%:*}; name=${u#*:}
   t "register $name" 201 -b "$D/$jar" -c "$D/$jar" "${J[@]}" -d "{\"name\":\"$name\",\"email\":\"$name$RUN@test.io\",\"password\":\"secret123\",\"password_confirmation\":\"secret123\"}" $B/register
 done
@@ -59,6 +59,52 @@ t "delete the .pptx" 200 "${A[@]}" -X DELETE $B/api/learn/materials/$MID
 t "  its pages are gone" 404 "${A[@]}" $B/api/learn/materials/$MID/pages
 code=$(curl -s -o /dev/null -w "%{http_code}" "$IMG")
 if [ "$code" != 200 ]; then pass=$((pass+1)); echo "ok   picture removed from storage ($code)"; else failn=$((failn+1)); echo "FAIL picture still served after delete"; fi
+
+# ── Slides as written: build mode, cutting into units, learners (F1.10, F3.3, F3.7)
+python3 - "$D" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1] + "/blank.pptx", "w") as z:
+    z.writestr("ppt/slides/slide1.xml", '<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree/></p:cSld></p:sld>')
+PY
+t "sam creates a slides course" 201 "${A[@]}" -F course_title="Recursion as written" -F course_description="Lecture 3" -F course_category_id=1 -F build_mode=slides $B/api/course
+SC=$(py "d['course_id']")
+t "builder view" 200 "${A[@]}" $B/api/learn/courses/$SC
+check "  build mode is slides" "d['data']['course']['build_mode']=='slides'"
+t "upload the lecture" 201 "${A[@]}" -F "file=@$DECK" -F title="Lecture 3" $B/api/learn/courses/$SC/materials
+SM=$(py "d['data']['id']")
+check "  ready at once, no AI digest" "d['data']['status']=='ready' and not d['data']['digest']['summary']"
+t "a deck with no text is fine here" 201 "${A[@]}" -F "file=@$D/blank.pptx" $B/api/learn/courses/$SC/materials
+BLANK=$(py "d['data']['id']")
+t "  (remove it)" 200 "${A[@]}" -X DELETE $B/api/learn/materials/$BLANK
+t "a video is not watched by the AI" 201 "${A[@]}" "${J[@]}" -d '{"kind":"video","url":"https://youtu.be/dQw4w9WgXcQ","title":"Intro"}' $B/api/learn/courses/$SC/materials
+check "  ready at once" "d['data']['status']=='ready'"
+t "AI organise is refused" 422 "${A[@]}" -X POST $B/api/learn/courses/$SC/organise
+check "  says to cut the slides" "'slides as written' in d['message']"
+t "publish needs units" 422 "${A[@]}" "${J[@]}" -d '{"visibility":"public","confirm_rights":true}' $B/api/learn/courses/$SC/publish
+t "a range past the last slide" 422 "${A[@]}" "${J[@]}" -X PUT -d "{\"units\":[{\"title\":\"x\",\"material_id\":$SM,\"first_page\":1,\"last_page\":9}]}" $B/api/learn/courses/$SC/slide-units
+t "first after last" 422 "${A[@]}" "${J[@]}" -X PUT -d "{\"units\":[{\"title\":\"x\",\"material_id\":$SM,\"first_page\":3,\"last_page\":2}]}" $B/api/learn/courses/$SC/slide-units
+t "a material of another course" 422 "${A[@]}" "${J[@]}" -X PUT -d "{\"units\":[{\"title\":\"x\",\"material_id\":$PDF,\"first_page\":1,\"last_page\":1}]}" $B/api/learn/courses/$SC/slide-units
+t "kim cannot cut sam's slides" 403 "${Bo[@]}" "${J[@]}" -X PUT -d "{\"units\":[{\"title\":\"x\",\"material_id\":$SM,\"first_page\":1,\"last_page\":1}]}" $B/api/learn/courses/$SC/slide-units
+t "cut into two units (by section)" 200 "${A[@]}" "${J[@]}" -X PUT -d "{\"units\":[{\"title\":\"Basics\",\"material_id\":$SM,\"first_page\":1,\"last_page\":3},{\"title\":\"  \",\"material_id\":$SM,\"first_page\":4,\"last_page\":8}]}" $B/api/learn/courses/$SC/slide-units
+check "  two units with ranges" "[(u['title'],u['slides'][0]['first_page'],u['slides'][0]['last_page']) for u in d['data']]==[('Basics',1,3),('Slides 4–8',4,8)]"
+U1=$(py "d['data'][0]['id']"); U2=$(py "d['data'][1]['id']")
+t "the mode cannot change once there are units" 409 "${A[@]}" "${J[@]}" -X PUT -d '{"build_mode":"ai"}' $B/api/learn/courses/$SC/build-mode
+t "creator reads unit 2's slides" 200 "${A[@]}" $B/api/learn/units/$U2/pages
+check "  slides 4,5,6,8 (7 is hidden)" "[p['number'] for p in d['data'][0]['pages']]==[4,5,6,8]"
+t "publish" 200 "${A[@]}" "${J[@]}" -d '{"visibility":"public","confirm_rights":true}' $B/api/learn/courses/$SC/publish
+t "kim joins" 200 "${Bo[@]}" -X POST $B/api/learn/courses/$SC/join
+t "learner outline" 200 "${Bo[@]}" $B/api/learn/courses/$SC
+check "  units show their slide ranges" "d['data']['units'][0]['slides'][0]['last_page']==3"
+t "kim reads unit 1" 200 "${Bo[@]}" $B/api/learn/units/$U1/pages
+check "  slides 1-3, no speaker notes" "[p['number'] for p in d['data'][0]['pages']]==[1,2,3] and not any(p.get('notes') for p in d['data'][0]['pages'])"
+check "  original file link for diagrams" "d['data'][0]['url'].startswith('http')"
+t "unit 2 is locked" 403 "${Bo[@]}" $B/api/learn/units/$U2/pages
+t "kim finishes unit 1" 200 "${Bo[@]}" -X POST $B/api/learn/units/$U1/complete
+t "unit 2 opens" 200 "${Bo[@]}" $B/api/learn/units/$U2/pages
+t "a stranger cannot read it" 404 "${C[@]}" $B/api/learn/units/$U2/pages
+t "re-cut keeping unit 1 (progress stays)" 200 "${A[@]}" "${J[@]}" -X PUT -d "{\"units\":[{\"id\":$U1,\"title\":\"Basics\",\"material_id\":$SM,\"first_page\":1,\"last_page\":2},{\"id\":$U2,\"title\":\"Deeper\",\"material_id\":$SM,\"first_page\":3,\"last_page\":8}]}" $B/api/learn/courses/$SC/slide-units
+t "unit 2 still open for kim" 200 "${Bo[@]}" $B/api/learn/units/$U2/pages
+check "  now from slide 3" "d['data'][0]['pages'][0]['number']==3"
 
 echo; echo "passed $pass, failed $failn"
 [ "$failn" = 0 ]

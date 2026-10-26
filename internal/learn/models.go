@@ -137,6 +137,10 @@ type UnitMaterial struct {
 	UnitID     int `gorm:"primaryKey"`
 	MaterialID int `gorm:"primaryKey;index"`
 	Position   int `gorm:"not null"`
+	// Slides as written (F3.3): the unit reads pages FirstPage..LastPage of
+	// the material. 0 = the whole material.
+	FirstPage int `gorm:"not null;default:0"`
+	LastPage  int `gorm:"not null;default:0"`
 }
 
 // UnitProgress records that a learner finished a unit (F1.7).

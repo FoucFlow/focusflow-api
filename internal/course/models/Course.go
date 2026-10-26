@@ -35,6 +35,9 @@ type Course struct {
 	ReferencesWaiting bool       `json:"references_waiting"`                                     // the search stopped because the AI was busy; it goes on later
 	ReferencesStatus  string     `json:"references_status" gorm:"size:16;not null;default:idle"` // idle | processing | ready | failed
 	PriceRWF          int        `json:"price_rwf" gorm:"not null;default:0"`                    // always 0 during the free pilot
+	// slides = "use my slides as written" (AI only structures and finds
+	// references); ai = "let AI write lessons" (FEATURES.md F1.10)
+	BuildMode string `json:"build_mode" gorm:"size:16;not null;default:ai"`
 
 	Enrollments     []Enrollment `json:"enrollments,omitempty" gorm:"-"`
 	EnrollmentCount int          `json:"enrollment_count" gorm:"-"`
