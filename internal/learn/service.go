@@ -1074,3 +1074,22 @@ func (s *Service) Complete(userID int, u *Unit) error {
 		Attrs(UnitProgress{CourseID: u.CourseID, CompletedAt: time.Now()}).
 		FirstOrCreate(&UnitProgress{}).Error
 }
+
+// covers returns a card image per course: the first YouTube video's thumbnail
+// (courses with an uploaded cover use course_thumb instead; the frontend picks).
+func (s *Service) covers(courseIDs []int) map[int]string {
+	out := map[int]string{}
+	if len(courseIDs) == 0 {
+		return out
+	}
+	var rows []Material
+	s.db.Select("course_id, you_tube_id").
+		Where("course_id IN ? AND kind = ? AND you_tube_id <> ''", courseIDs, "video").
+		Order("course_id, position, id").Find(&rows)
+	for _, m := range rows {
+		if _, ok := out[m.CourseID]; !ok {
+			out[m.CourseID] = "https://i.ytimg.com/vi/" + m.YouTubeID + "/hqdefault.jpg"
+		}
+	}
+	return out
+}

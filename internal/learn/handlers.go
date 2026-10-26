@@ -737,8 +737,9 @@ func (h *Handler) Unpublish(c *gin.Context) {
 func (h *Handler) Browse(c *gin.Context) {
 	type row struct {
 		coursemodels.Course
-		Units    int `json:"units"`
-		Learners int `json:"learners"`
+		Units    int    `json:"units"`
+		Learners int    `json:"learners"`
+		Cover    string `json:"cover,omitempty"`
 	}
 	var courses []coursemodels.Course
 	q := h.s.db.Preload("Category").Where("course_status = ? AND course_visibility = ?", "published", "public")
@@ -747,12 +748,17 @@ func (h *Handler) Browse(c *gin.Context) {
 		q = q.Where("LOWER(course_title) LIKE ? OR LOWER(course_description) LIKE ?", like, like)
 	}
 	q.Order("published_at DESC").Limit(100).Find(&courses)
+	ids := make([]int, 0, len(courses))
+	for _, course := range courses {
+		ids = append(ids, *course.CourseId)
+	}
+	covers := h.s.covers(ids)
 	out := make([]row, 0, len(courses))
 	for _, course := range courses {
 		var units, learners int64
 		h.s.db.Model(&Unit{}).Where("course_id = ?", *course.CourseId).Count(&units)
 		h.s.db.Model(&coursemodels.Enrollment{}).Where("course_id = ?", *course.CourseId).Count(&learners)
-		out = append(out, row{Course: course, Units: int(units), Learners: int(learners)})
+		out = append(out, row{Course: course, Units: int(units), Learners: int(learners), Cover: covers[*course.CourseId]})
 	}
 	c.JSON(http.StatusOK, gin.H{"data": out})
 }
@@ -846,10 +852,10 @@ func (h *Handler) CompleteUnit(c *gin.Context) {
 func (h *Handler) Me(c *gin.Context) {
 	me := c.GetInt(auth.CtxUserID)
 	created := []coursemodels.Course{}
-	h.s.db.Where("user_id = ?", me).Order("course_id DESC").Find(&created)
+	h.s.db.Preload("Category").Where("user_id = ?", me).Order("course_id DESC").Find(&created)
 
 	var enrollments []coursemodels.Enrollment
-	h.s.db.Preload("Course").Where("user_id = ?", me).Order("enrolled_at DESC").Find(&enrollments)
+	h.s.db.Preload("Course.Category").Where("user_id = ?", me).Order("enrolled_at DESC").Find(&enrollments)
 	type joinedRow struct {
 		Course         coursemodels.Course `json:"course"`
 		CompletedUnits int                 `json:"completed_units"`
@@ -857,7 +863,8 @@ func (h *Handler) Me(c *gin.Context) {
 	}
 	joined := make([]joinedRow, 0, len(enrollments))
 	for _, e := range enrollments {
-		if e.Course.CourseStatus != "published" {
+		// own courses are listed under "created", not as joined
+		if e.Course.CourseStatus != "published" || e.Course.UserId == me {
 			continue
 		}
 		joined = append(joined, joinedRow{Course: e.Course,
@@ -869,11 +876,20 @@ func (h *Handler) Me(c *gin.Context) {
 			progress[*created[i].CourseId] = h.s.courseProgress(&created[i])
 		}
 	}
+	ids := []int{}
+	for _, cr := range created {
+		if cr.CourseId != nil {
+			ids = append(ids, *cr.CourseId)
+		}
+	}
+	for _, j := range joined {
+		ids = append(ids, *j.Course.CourseId)
+	}
 	canCreate, reason := h.s.CanCreateCourse(me, isAdmin(c))
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"created": created, "joined": joined, "limits": h.s.limits,
 		"can_create_course": canCreate, "create_limit_reason": reason, "ai_allowance": h.s.UserAllowance(me),
-		"progress": progress,
+		"progress": progress, "covers": h.s.covers(ids),
 	}})
 }
 
