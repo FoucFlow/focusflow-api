@@ -88,12 +88,20 @@ type SourceConcept struct {
 
 // Unit is one section of a course (F1.5). Body is Markdown.
 type Unit struct {
-	ID        int       `json:"id" gorm:"primaryKey"`
-	CourseID  int       `json:"course_id" gorm:"not null;index"`
-	Position  int       `json:"position" gorm:"not null"`
-	Title     string    `json:"title" gorm:"size:255;not null"`
-	Body      string    `json:"body" gorm:"type:text"`
-	Source    string    `json:"source" gorm:"size:16;not null;default:manual"` // ai | manual
+	ID       int    `json:"id" gorm:"primaryKey"`
+	CourseID int    `json:"course_id" gorm:"not null;index"`
+	Position int    `json:"position" gorm:"not null"`
+	Title    string `json:"title" gorm:"size:255;not null"`
+	Body     string `json:"body" gorm:"type:text"`
+	Source   string `json:"source" gorm:"size:16;not null;default:manual"` // ai | manual
+	// Kind: lesson (studied) or quiz (a test placed anywhere in the course,
+	// F2.2). A quiz covers Covers (unit ids; empty = every lesson before it).
+	Kind   string `json:"kind" gorm:"size:16;not null;default:lesson"`
+	Covers []int  `json:"covers,omitempty" gorm:"type:jsonb;serializer:json"`
+	Final  bool   `json:"final"` // the course's final exam (F2.6)
+	// Optional units never block the next one: practice quizzes and quizzes
+	// not ready yet (kept in sync by syncOptional).
+	Optional  bool      `json:"optional"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -174,7 +182,7 @@ func (AIUsage) TableName() string { return "ai_usage" }
 // Models lists the tables this package owns, for AutoMigrate.
 func Models() []any {
 	return []any{&Material{}, &Unit{}, &Concept{}, &UnitMaterial{}, &UnitProgress{}, &AIUsage{},
-		&Question{}, &TestSettings{}, &Attempt{}, &MarkChange{}, &AICall{}, &SlidePage{}}
+		&Question{}, &TestSettings{}, &Attempt{}, &MarkChange{}, &AICall{}, &SlidePage{}, &Certificate{}}
 }
 
 // BeforeCreate puts a new material after the course's others.

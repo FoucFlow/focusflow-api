@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"sort"
 	"strings"
 	"time"
 
 	coursemodels "focusflow-api/internal/course/models"
+	"focusflow-api/internal/platform/storage"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -55,7 +57,7 @@ func (s *Service) activeTests(unitIDs []int) map[int]bool {
 		return out
 	}
 	var ids []int
-	s.db.Model(&TestSettings{}).Where("unit_id IN ? AND enabled", unitIDs).
+	s.db.Model(&TestSettings{}).Where("unit_id IN ? AND enabled AND NOT practice", unitIDs).
 		Where("EXISTS (SELECT 1 FROM unit_questions q WHERE q.unit_id = unit_tests.unit_id)").Pluck("unit_id", &ids)
 	for _, id := range ids {
 		out[id] = true
@@ -71,6 +73,10 @@ func (s *Service) saveSettings(st *TestSettings) error {
 func deleteTests(tx *gorm.DB, unitIDs []int) error {
 	if len(unitIDs) == 0 {
 		return nil
+	}
+	// Camera pictures go with the attempts (best effort, outside the transaction)
+	for _, k := range snapshotKeys(tx, unitIDs) {
+		storage.DeleteKey(context.Background(), k)
 	}
 	if err := tx.Where("attempt_id IN (?)", tx.Model(&Attempt{}).Select("id").Where("unit_id IN ?", unitIDs)).Delete(&MarkChange{}).Error; err != nil {
 		return err
@@ -94,10 +100,8 @@ func (s *Service) StartQuestions(u *Unit, c *coursemodels.Course) error {
 	if err := s.checkAI(c.UserId); err != nil {
 		return errors.New(limitMessage(err))
 	}
-	var n int64
-	s.db.Model(&Concept{}).Where("unit_id = ?", u.ID).Count(&n)
-	if n == 0 && strings.TrimSpace(u.Body) == "" {
-		return errors.New("This unit has no lessons yet to write questions from.")
+	if len(s.examMaterial(u)) == 0 {
+		return errors.New("There is nothing to write questions from yet: add lessons or slides first.")
 	}
 	st := s.testSettings(u.ID, u.CourseID)
 	if st.PoolStatus == StatusProcessing {
@@ -126,12 +130,7 @@ func (s *Service) writeQuestions(unitID, ownerID int) {
 		return
 	}
 	st := s.testSettings(u.ID, u.CourseID)
-	in := QuestionsInput{CourseTitle: c.CourseTitle, Language: c.CourseLanguage, UnitTitle: u.Title}
-	var concepts []Concept
-	s.db.Where("unit_id = ?", u.ID).Order("position, id").Find(&concepts)
-	for _, con := range concepts {
-		in.Concepts = append(in.Concepts, ExamConcept{Title: con.Title, Lesson: clip(con.Explanation, 3000)})
-	}
+	in := QuestionsInput{CourseTitle: c.CourseTitle, Language: c.CourseLanguage, UnitTitle: u.Title, Concepts: s.examMaterial(&u)}
 	if len(in.Concepts) == 0 {
 		in.Concepts = []ExamConcept{{Title: u.Title, Lesson: clip(u.Body, 8000)}}
 	}
@@ -170,6 +169,9 @@ func (s *Service) writeQuestions(unitID, ownerID int) {
 			if qs[i].Options == nil {
 				qs[i].Options = []string{}
 			}
+			if qs[i].Corrects == nil {
+				qs[i].Corrects = []int{}
+			}
 			if err := tx.Create(&qs[i]).Error; err != nil {
 				return err
 			}
@@ -181,6 +183,7 @@ func (s *Service) writeQuestions(unitID, ownerID int) {
 		slog.Error("save questions", "unit", unitID, "error", err)
 		fail("Could not save the questions. Please try again.")
 	}
+	s.syncOptional(unitID)
 }
 
 func clampInt(v, lo, hi int) int {
@@ -210,9 +213,14 @@ func (s *Service) canStart(userID int, st TestSettings, attempts []Attempt) (boo
 			return false, "You passed this test."
 		case a.Status == AttemptMarking:
 			return false, "Your last attempt is being marked."
+		case a.Status == AttemptExplain:
+			return false, "Answer the follow-up questions of your last attempt first."
 		case a.Status == AttemptReview:
 			return false, "Your last attempt is waiting for your teacher's review."
 		}
+	}
+	if open, why := windowOpen(st, time.Now()); !open {
+		return false, why
 	}
 	if st.MaxAttempts > 0 && len(attempts) >= st.MaxAttempts {
 		return false, fmt.Sprintf("You have used all %d attempts. Ask the course creator if you need another.", st.MaxAttempts)
@@ -228,11 +236,14 @@ func (s *Service) canStart(userID int, st TestSettings, attempts []Attempt) (boo
 }
 
 // StartAttempt resumes the learner's open attempt, or draws a new one.
-func (s *Service) StartAttempt(userID int, u *Unit) (*Attempt, error) {
+func (s *Service) StartAttempt(userID int, u *Unit, accessCode string) (*Attempt, error) {
 	if a := s.openAttempt(userID, u.ID); a != nil {
 		return a, nil
 	}
 	st := s.testSettings(u.ID, u.CourseID)
+	if st.AccessCode != "" && !strings.EqualFold(strings.TrimSpace(accessCode), st.AccessCode) {
+		return nil, errors.New("Enter the access code your teacher gives out in the room.")
+	}
 	pool := s.questions(u.ID)
 	if !st.Enabled || len(pool) == 0 {
 		return nil, errors.New("This unit has no test.")
@@ -295,14 +306,25 @@ func drawItems(pool []Question, n int) []AttemptItem {
 	for _, i := range idx[:n] {
 		q := pool[i]
 		it := AttemptItem{QuestionID: q.ID, Kind: q.Kind, Prompt: q.Prompt, Guide: q.AnswerGuide, Concept: q.Concept}
-		if q.Kind == QuestionMCQ {
+		switch q.Kind {
+		case QuestionMCQ, QuestionMulti:
+			right := map[int]bool{}
+			for _, c := range q.Corrects {
+				right[c] = true
+			}
 			order := rand.Perm(len(q.Options))
 			for pos, orig := range order {
 				it.Options = append(it.Options, q.Options[orig])
 				if orig == q.Correct {
 					it.Correct = pos
 				}
+				if right[orig] {
+					it.Corrects = append(it.Corrects, pos)
+				}
 			}
+			sort.Ints(it.Corrects)
+		case QuestionTrueFalse:
+			it.Options, it.Correct = q.Options, q.Correct // True, False stay in order
 		}
 		items = append(items, it)
 	}
@@ -311,9 +333,10 @@ func drawItems(pool []Question, n int) []AttemptItem {
 
 // AnswerIn is one answer sent by the learner, by item index.
 type AnswerIn struct {
-	Index  int    `json:"index"`
-	Choice *int   `json:"choice"`
-	Answer string `json:"answer"`
+	Index   int    `json:"index"`
+	Choice  *int   `json:"choice"`
+	Choices []int  `json:"choices"` // multiple select
+	Answer  string `json:"answer"`
 }
 
 func applyAnswers(items []AttemptItem, answers []AnswerIn) {
@@ -322,7 +345,17 @@ func applyAnswers(items []AttemptItem, answers []AnswerIn) {
 			continue
 		}
 		it := &items[in.Index]
-		if it.Kind == QuestionMCQ {
+		if it.Kind == QuestionMulti {
+			seen := map[int]bool{}
+			it.Choices = []int{}
+			for _, c := range in.Choices {
+				if c >= 0 && c < len(it.Options) && !seen[c] {
+					seen[c] = true
+					it.Choices = append(it.Choices, c)
+				}
+			}
+			sort.Ints(it.Choices)
+		} else if choiceKind(it.Kind) {
 			if in.Choice != nil && *in.Choice >= 0 && *in.Choice < len(it.Options) {
 				v := *in.Choice
 				it.Choice = &v
@@ -398,11 +431,8 @@ func (s *Service) Submit(a *Attempt, answers []AnswerIn, auto bool) error {
 		for i := range cur.Items {
 			it := &cur.Items[i]
 			switch {
-			case it.Kind == QuestionMCQ:
-				v := 0.0
-				if it.Choice != nil && *it.Choice == it.Correct {
-					v = 1
-				}
+			case choiceKind(it.Kind):
+				v := markChoice(it)
 				it.AIMark, it.Mark = &v, &v
 			case strings.TrimSpace(it.Answer) == "":
 				v := 0.0
@@ -413,7 +443,7 @@ func (s *Service) Submit(a *Attempt, answers []AnswerIn, auto bool) error {
 		}
 		cur.Status = AttemptMarking
 		if !toMark {
-			finalise(&cur)
+			s.afterMarked(&cur)
 		}
 		*a = cur
 		return tx.Model(&cur).Select("status", "items", "events", "submitted_at", "auto_submitted", "score_percent", "passed").Updates(&cur).Error
@@ -424,10 +454,34 @@ func (s *Service) Submit(a *Attempt, answers []AnswerIn, auto bool) error {
 	if toMark {
 		id := a.ID
 		s.enqueue(func() { s.markAttempt(id) })
-	} else if a.Passed {
-		s.completeUnit(a.UserID, a.UnitID, a.CourseID)
+	} else {
+		s.afterStatus(a)
 	}
 	return nil
+}
+
+// afterMarked: every answer has a mark. With "explain your answer" on, the
+// learner first answers follow-up questions (F2.5); otherwise the attempt is
+// finalised.
+func (s *Service) afterMarked(a *Attempt) {
+	if a.Settings.ExplainAnswers && s.exam != nil {
+		a.ScorePercent = score(a.Items)
+		a.Status = AttemptExplain
+		return
+	}
+	finalise(a)
+}
+
+// afterStatus runs the follow-up of a saved attempt: write the follow-up
+// questions, or finish the unit when the result is in.
+func (s *Service) afterStatus(a *Attempt) {
+	switch {
+	case a.Status == AttemptExplain && len(a.Followups) == 0:
+		id := a.ID
+		s.enqueue(func() { s.writeFollowups(id) })
+	case a.Status == AttemptDone && (a.Passed || a.Settings.Practice):
+		s.completeUnit(a.UserID, a.UnitID, a.CourseID)
+	}
 }
 
 // finalise computes the score and moves the attempt on: to the teacher when
@@ -471,7 +525,7 @@ func (s *Service) markAttempt(id int) {
 		in.CourseTitle, in.Language = c.CourseTitle, c.CourseLanguage
 	}
 	for i, it := range a.Items {
-		if it.Kind != QuestionMCQ && it.Mark == nil {
+		if !choiceKind(it.Kind) && it.Mark == nil {
 			in.Items = append(in.Items, MarkItem{Index: i + 1, Kind: it.Kind, Question: it.Prompt, Guide: it.Guide, Answer: it.Answer})
 		}
 	}
@@ -505,11 +559,9 @@ func (s *Service) markAttempt(id int) {
 		v := m.Mark
 		it.AIMark, it.Mark, it.AIFeedback = &v, &v, m.Feedback
 	}
-	finalise(&a)
+	s.afterMarked(&a)
 	s.db.Model(&a).Select("status", "items", "score_percent", "passed").Updates(&a)
-	if a.Passed {
-		s.completeUnit(a.UserID, a.UnitID, a.CourseID)
-	}
+	s.afterStatus(&a)
 }
 
 // ReviewMark is the teacher's mark for one item (F2.4).
@@ -561,8 +613,8 @@ func (s *Service) Review(a *Attempt, reviewerID int, marks []ReviewMark) error {
 		*a = cur
 		return tx.Model(&cur).Select("status", "items", "score_percent", "passed", "reviewed_by", "reviewed_at").Updates(&cur).Error
 	})
-	if err == nil && a.Passed {
-		s.completeUnit(a.UserID, a.UnitID, a.CourseID)
+	if err == nil {
+		s.afterStatus(a)
 	}
 	return err
 }
@@ -570,6 +622,7 @@ func (s *Service) Review(a *Attempt, reviewerID int, marks []ReviewMark) error {
 func (s *Service) completeUnit(userID, unitID, courseID int) {
 	s.db.Where(UnitProgress{UserID: userID, UnitID: unitID}).
 		Attrs(UnitProgress{CourseID: courseID, CompletedAt: time.Now()}).FirstOrCreate(&UnitProgress{})
+	s.maybeCertify(userID, courseID)
 }
 
 // sweepLoop auto-submits attempts whose time ran out (the learner closed the page).
@@ -604,6 +657,17 @@ func (s *Service) resumeTests() int {
 	for _, a := range marking {
 		id := a.ID
 		s.enqueue(func() { s.markAttempt(id) })
+	}
+	// Explain step interrupted: follow-ups not written, or replies not checked
+	var explaining []Attempt
+	s.db.Where("status = ?", AttemptExplain).Find(&explaining)
+	for _, a := range explaining {
+		id := a.ID
+		if len(a.Followups) == 0 {
+			s.enqueue(func() { s.writeFollowups(id) })
+		} else if a.Followups[0].Answer != "" {
+			s.enqueue(func() { s.checkConsistency(id) })
+		}
 	}
 	go s.sweepLoop()
 	return len(pools) + len(marking)

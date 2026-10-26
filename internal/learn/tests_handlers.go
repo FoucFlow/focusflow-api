@@ -16,11 +16,16 @@ import (
 // learnerItem is what a learner sees of one question: never the correct
 // option or the answer guide (the pool is reused across learners).
 type learnerItem struct {
-	Kind     string   `json:"kind"`
-	Prompt   string   `json:"prompt"`
-	Options  []string `json:"options,omitempty"`
-	Choice   *int     `json:"choice"`
-	Answer   string   `json:"answer"`
+	Kind    string   `json:"kind"`
+	Prompt  string   `json:"prompt"`
+	Options []string `json:"options,omitempty"`
+	Choice  *int     `json:"choice"`
+	Choices []int    `json:"choices,omitempty"`
+	Answer  string   `json:"answer"`
+	// The right answer, only when the quiz shows answers (F2.3 show_answers)
+	Correct  *int     `json:"correct,omitempty"`
+	Corrects []int    `json:"corrects,omitempty"`
+	Guide    string   `json:"answer_guide,omitempty"`
 	Mark     *float64 `json:"mark,omitempty"`
 	Feedback string   `json:"feedback,omitempty"`
 	Note     string   `json:"teacher_note,omitempty"`
@@ -41,6 +46,11 @@ type learnerAttempt struct {
 	PassMark      int           `json:"pass_mark"`
 	TrackTab      bool          `json:"track_tab"`
 	TrackPaste    bool          `json:"track_paste"`
+	AllOnOnePage  bool          `json:"all_on_one_page"`
+	NoBack        bool          `json:"no_back"`
+	ShowAnswers   string        `json:"show_answers"`
+	Camera        bool          `json:"camera"`
+	Followups     []Followup    `json:"followups,omitempty"` // explain step: questions to answer
 	Message       string        `json:"message,omitempty"`
 	ServerTime    time.Time     `json:"server_time"` // for the countdown
 }
@@ -50,14 +60,29 @@ func toLearner(a *Attempt) learnerAttempt {
 	v := learnerAttempt{ID: a.ID, UnitID: a.UnitID, Number: a.Number, Status: a.Status, StartedAt: a.StartedAt,
 		Deadline: a.Deadline, SubmittedAt: a.SubmittedAt, AutoSubmitted: a.AutoSubmitted, Passed: a.Passed,
 		PassMark: a.Settings.PassMark, TrackTab: a.Settings.TrackTab, TrackPaste: a.Settings.TrackPaste,
-		ServerTime: time.Now(), Items: make([]learnerItem, len(a.Items))}
+		AllOnOnePage: a.Settings.AllOnOnePage, NoBack: a.Settings.NoBack, ShowAnswers: a.Settings.ShowAnswers,
+		Camera: a.Settings.Camera, ServerTime: time.Now(), Items: make([]learnerItem, len(a.Items))}
 	done := a.Status == AttemptDone
+	lastChance := a.Passed || (a.Settings.MaxAttempts > 0 && a.Number >= a.Settings.MaxAttempts)
+	reveal := done && answersVisible(a.Settings, time.Now(), lastChance)
 	for i, it := range a.Items {
-		li := learnerItem{Kind: it.Kind, Prompt: it.Prompt, Options: it.Options, Choice: it.Choice, Answer: it.Answer}
+		li := learnerItem{Kind: it.Kind, Prompt: it.Prompt, Options: it.Options, Choice: it.Choice, Choices: it.Choices, Answer: it.Answer}
 		if done {
 			li.Mark, li.Feedback, li.Note = it.Mark, it.AIFeedback, it.Note
 		}
+		if reveal {
+			li.Guide = it.Guide
+			if choiceKind(it.Kind) {
+				c := it.Correct
+				li.Correct, li.Corrects = &c, it.Corrects
+			}
+		}
 		v.Items[i] = li
+	}
+	if a.Status == AttemptExplain {
+		for _, f := range a.Followups {
+			v.Followups = append(v.Followups, Followup{Question: f.Question, Answer: f.Answer})
+		}
 	}
 	switch a.Status {
 	case AttemptDone:
@@ -67,6 +92,15 @@ func toLearner(a *Attempt) learnerAttempt {
 		v.Message = "Your written answers are being marked. This usually takes under a minute."
 	case AttemptReview:
 		v.Message = "Your teacher reviews this test before you get the result."
+	case AttemptExplain:
+		switch {
+		case len(a.Followups) == 0:
+			v.Message = "Preparing a few questions about your answers…"
+		case a.Followups[0].Answer == "":
+			v.Message = "Explain your answers in your own words. This does not change your mark."
+		default:
+			v.Message = "Thanks. Your result is on its way."
+		}
 	}
 	return v
 }
@@ -78,7 +112,10 @@ func learnerSettings(st TestSettings, pool int) gin.H {
 		n = pool
 	}
 	return gin.H{"questions": n, "pass_mark": st.PassMark, "time_limit_minutes": st.TimeLimitMinutes,
-		"max_attempts": st.MaxAttempts, "teacher_review": st.TeacherReview, "track_tab": st.TrackTab, "track_paste": st.TrackPaste}
+		"max_attempts": st.MaxAttempts, "teacher_review": st.TeacherReview, "track_tab": st.TrackTab, "track_paste": st.TrackPaste,
+		"level": st.Level, "practice": st.Practice, "show_answers": st.ShowAnswers, "all_on_one_page": st.AllOnOnePage,
+		"no_back": st.NoBack, "opens_at": st.OpensAt, "closes_at": st.ClosesAt, "needs_code": st.AccessCode != "",
+		"explain_answers": st.ExplainAnswers, "camera": st.Camera}
 }
 
 // testSummary goes into each unit of the course view.
@@ -217,12 +254,64 @@ func (h *Handler) UpdateTest(c *gin.Context) {
 		TeacherReview    *bool `json:"teacher_review"`
 		TrackTab         *bool `json:"track_tab"`
 		TrackPaste       *bool `json:"track_paste"`
+		// Restriction level first, then any field changes it (→ custom)
+		Level          *string `json:"level"`
+		Practice       *bool   `json:"practice"`
+		ShowAnswers    *string `json:"show_answers"`
+		AllOnOnePage   *bool   `json:"all_on_one_page"`
+		NoBack         *bool   `json:"no_back"`
+		OpensAt        *string `json:"opens_at"`        // RFC 3339, "" clears
+		ClosesAt       *string `json:"closes_at"`       // RFC 3339, "" clears
+		NewAccessCode  *bool   `json:"new_access_code"` // true: new code; false: no code
+		ExplainAnswers *bool   `json:"explain_answers"`
+		Camera         *bool   `json:"camera"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
 		fail(c, http.StatusBadRequest, "The request body must be valid JSON.")
 		return
 	}
 	st := h.s.testSettings(u.ID, u.CourseID)
+	if in.Level != nil {
+		if err := applyLevel(&st, *in.Level); err != nil {
+			fail(c, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+	}
+	if in.ShowAnswers != nil {
+		if !showAnswersValues[*in.ShowAnswers] {
+			fail(c, http.StatusUnprocessableEntity, "show_answers must be after_question, after_submit, after_close or never.")
+			return
+		}
+		st.ShowAnswers = *in.ShowAnswers
+	}
+	for _, d := range []struct {
+		in  *string
+		dst **time.Time
+	}{{in.OpensAt, &st.OpensAt}, {in.ClosesAt, &st.ClosesAt}} {
+		if d.in == nil {
+			continue
+		}
+		if *d.in == "" {
+			*d.dst = nil
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, *d.in)
+		if err != nil {
+			fail(c, http.StatusUnprocessableEntity, "Dates must be in RFC 3339 format, e.g. 2026-11-02T09:00:00Z.")
+			return
+		}
+		*d.dst = &t
+	}
+	if st.OpensAt != nil && st.ClosesAt != nil && !st.ClosesAt.After(*st.OpensAt) {
+		fail(c, http.StatusUnprocessableEntity, "The test must close after it opens.")
+		return
+	}
+	if in.NewAccessCode != nil {
+		st.AccessCode = ""
+		if *in.NewAccessCode {
+			st.AccessCode = newAccessCode()
+		}
+	}
 	rng := func(p *int, lo, hi int, dst *int, msg string) bool {
 		if p == nil {
 			return true
@@ -240,7 +329,9 @@ func (h *Handler) UpdateTest(c *gin.Context) {
 		!rng(in.MaxAttempts, 0, 20, &st.MaxAttempts, "Attempts must be between 0 (unlimited) and 20.") {
 		return
 	}
-	for p, dst := range map[*bool]*bool{in.TeacherReview: &st.TeacherReview, in.TrackTab: &st.TrackTab, in.TrackPaste: &st.TrackPaste} {
+	for p, dst := range map[*bool]*bool{in.TeacherReview: &st.TeacherReview, in.TrackTab: &st.TrackTab, in.TrackPaste: &st.TrackPaste,
+		in.Practice: &st.Practice, in.AllOnOnePage: &st.AllOnOnePage, in.NoBack: &st.NoBack,
+		in.ExplainAnswers: &st.ExplainAnswers, in.Camera: &st.Camera} {
 		if p != nil {
 			*dst = *p
 		}
@@ -252,10 +343,12 @@ func (h *Handler) UpdateTest(c *gin.Context) {
 		}
 		st.Enabled = *in.Enabled
 	}
+	st.Level = levelOf(st)
 	if err := h.s.saveSettings(&st); err != nil {
 		fail(c, http.StatusInternalServerError, "Could not save the test settings.")
 		return
 	}
+	h.s.syncOptional(u.ID)
 	c.JSON(http.StatusOK, gin.H{"data": st})
 }
 
@@ -277,6 +370,7 @@ type questionIn struct {
 	Prompt      *string   `json:"prompt"`
 	Options     *[]string `json:"options"`
 	Correct     *int      `json:"correct"`
+	Corrects    *[]int    `json:"corrects"`
 	AnswerGuide *string   `json:"answer_guide"`
 	Concept     *string   `json:"concept"`
 }
@@ -298,6 +392,9 @@ func (in questionIn) apply(q *Question) string {
 	if in.Correct != nil {
 		q.Correct = *in.Correct
 	}
+	if in.Corrects != nil {
+		q.Corrects = append([]int{}, *in.Corrects...)
+	}
 	if in.AnswerGuide != nil {
 		q.AnswerGuide = strings.TrimSpace(*in.AnswerGuide)
 	}
@@ -307,18 +404,38 @@ func (in questionIn) apply(q *Question) string {
 	if q.Prompt == "" {
 		return "A question needs its text."
 	}
+	if q.Corrects == nil {
+		q.Corrects = []int{}
+	}
 	switch q.Kind {
 	case QuestionMCQ:
 		if err := validOptions(q.Options, q.Correct); err != nil {
 			return err.Error()
 		}
+		q.Corrects = []int{}
+	case QuestionMulti:
+		if err := validOptions(q.Options, 0); err != nil {
+			return err.Error()
+		}
+		if msg := validCorrects(q.Corrects, len(q.Options)); msg != "" {
+			return msg
+		}
+		q.Correct = q.Corrects[0]
+	case QuestionTrueFalse:
+		if len(q.Options) != 2 || q.Options[0] == "" || q.Options[1] == "" {
+			q.Options = []string{"True", "False"}
+		}
+		if q.Correct != 0 && q.Correct != 1 {
+			return "Choose whether the statement is true or false."
+		}
+		q.Corrects = []int{}
 	case QuestionShort, QuestionExplain:
-		q.Options, q.Correct = []string{}, 0
+		q.Options, q.Correct, q.Corrects = []string{}, 0, []int{}
 		if q.AnswerGuide == "" {
 			return "Written questions need an answer guide (what a full-mark answer contains), so they can be marked."
 		}
 	default:
-		return "kind must be mcq, short or explain."
+		return "kind must be mcq, multi, truefalse, short or explain."
 	}
 	return ""
 }
@@ -399,6 +516,7 @@ func (h *Handler) DeleteQuestion(c *gin.Context) {
 	if h.s.questionCount(q.UnitID) == 0 {
 		h.s.db.Model(&TestSettings{}).Where("unit_id = ?", q.UnitID).Update("enabled", false)
 	}
+	h.s.syncOptional(q.UnitID)
 	c.JSON(http.StatusOK, gin.H{"message": "Question deleted."})
 }
 
@@ -427,7 +545,11 @@ func (h *Handler) StartTest(c *gin.Context) {
 	if !h.learnerCanOpen(c, course, &u) {
 		return
 	}
-	a, err := h.s.StartAttempt(c.GetInt(auth.CtxUserID), &u)
+	var in struct {
+		AccessCode string `json:"access_code"`
+	}
+	_ = c.ShouldBindJSON(&in)
+	a, err := h.s.StartAttempt(c.GetInt(auth.CtxUserID), &u, in.AccessCode)
 	if err != nil {
 		fail(c, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -606,12 +728,15 @@ func (h *Handler) CourseAttempts(c *gin.Context) {
 		AutoSubmitted bool           `json:"auto_submitted"`
 		Evidence      map[string]int `json:"evidence"`
 		MarkError     string         `json:"mark_error,omitempty"`
+		Consistency   string         `json:"consistency,omitempty"`
+		Snapshots     int            `json:"snapshots,omitempty"`
 	}
 	out := make([]row, 0, len(attempts))
 	for _, a := range attempts {
 		out = append(out, row{ID: a.ID, UnitID: a.UnitID, UnitTitle: titles[a.UnitID], LearnerID: a.UserID, LearnerName: names[a.UserID],
 			Number: a.Number, Status: a.Status, ScorePercent: a.ScorePercent, Passed: a.Passed, SubmittedAt: a.SubmittedAt,
-			AutoSubmitted: a.AutoSubmitted, Evidence: evidenceSummary(a.Events), MarkError: a.MarkError})
+			AutoSubmitted: a.AutoSubmitted, Evidence: evidenceSummary(a.Events), MarkError: a.MarkError,
+			Consistency: a.Consistency, Snapshots: len(a.Snapshots)})
 	}
 	c.JSON(http.StatusOK, gin.H{"data": out})
 }
@@ -644,4 +769,19 @@ func (h *Handler) ReviewAttempt(c *gin.Context) {
 // last quota error and the limits Google reported in it.
 func (h *Handler) AIQuota(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": h.s.AIQuota()})
+}
+
+// validCorrects: at least one right option, each a valid index, no repeats.
+func validCorrects(cs []int, n int) string {
+	if len(cs) == 0 {
+		return "Choose at least one correct option."
+	}
+	seen := map[int]bool{}
+	for _, c := range cs {
+		if c < 0 || c >= n || seen[c] {
+			return "The correct options must be different options of this question."
+		}
+		seen[c] = true
+	}
+	return ""
 }

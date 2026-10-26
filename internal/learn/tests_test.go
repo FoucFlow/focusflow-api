@@ -104,15 +104,16 @@ func TestCleanQuestionsDropsBrokenOnes(t *testing.T) {
 		Prompt      string   `json:"prompt"`
 		Options     []string `json:"options"`
 		Correct     int      `json:"correct"`
+		Corrects    []int    `json:"corrects"`
 		AnswerGuide string   `json:"answer_guide"`
 	}
 	raw := rawQuestions{Questions: []q{
-		{1, "mcq", "ok?", []string{"a", "b", "c"}, 1, "b"},
-		{1, "mcq", "bad index", []string{"a", "b"}, 5, ""},
-		{1, "mcq", "duplicate options", []string{"a", "A"}, 0, ""},
-		{2, "short", "no guide", nil, 0, ""},
-		{2, "explain", "why?", nil, 0, "- because"},
-		{1, "essay", "unknown kind", nil, 0, "x"},
+		{1, "mcq", "ok?", []string{"a", "b", "c"}, 1, nil, "b"},
+		{1, "mcq", "bad index", []string{"a", "b"}, 5, nil, ""},
+		{1, "mcq", "duplicate options", []string{"a", "A"}, 0, nil, ""},
+		{2, "short", "no guide", nil, 0, nil, ""},
+		{2, "explain", "why?", nil, 0, nil, "- because"},
+		{1, "essay", "unknown kind", nil, 0, nil, "x"},
 	}}
 	qs, err := cleanQuestions(raw, []ExamConcept{{Title: "First"}, {Title: "Second"}})
 	if err != nil {

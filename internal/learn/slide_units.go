@@ -176,9 +176,13 @@ func (h *Handler) SaveSlideUnits(c *gin.Context) {
 		}
 	}
 
+	// Only lessons are replaced; quizzes keep their place in the sequence.
+	oldSeq := h.s.units(courseID)
 	existing := map[int]bool{}
-	for _, u := range h.s.units(courseID) {
-		existing[u.ID] = true
+	for _, u := range oldSeq {
+		if u.Kind != "quiz" {
+			existing[u.ID] = true
+		}
 	}
 	seen := map[int]bool{}
 	for i := range in.Units {
@@ -219,8 +223,9 @@ func (h *Handler) SaveSlideUnits(c *gin.Context) {
 		if err := deleteUnitIDs(tx, drop); err != nil {
 			return err
 		}
+		lessonIDs := make([]int, 0, len(in.Units))
 		for i, in := range in.Units {
-			u := Unit{ID: in.ID, CourseID: courseID, Position: i + 1, Title: in.Title, Source: "manual"}
+			u := Unit{ID: in.ID, CourseID: courseID, Position: i + 1, Title: in.Title, Source: "manual", Kind: "lesson"}
 			if in.ID == 0 {
 				if err := tx.Create(&u).Error; err != nil {
 					return err
@@ -235,6 +240,24 @@ func (h *Handler) SaveSlideUnits(c *gin.Context) {
 			}
 			if err := tx.Create(&UnitMaterial{UnitID: u.ID, MaterialID: in.MaterialID, Position: 0,
 				FirstPage: in.FirstPage, LastPage: in.LastPage}).Error; err != nil {
+				return err
+			}
+			lessonIDs = append(lessonIDs, u.ID)
+		}
+		// Lessons fill the lesson slots of the old sequence in order; quizzes stay put.
+		var seq []int
+		next := 0
+		for _, u := range oldSeq {
+			if u.Kind == "quiz" {
+				seq = append(seq, u.ID)
+			} else if next < len(lessonIDs) {
+				seq = append(seq, lessonIDs[next])
+				next++
+			}
+		}
+		seq = append(seq, lessonIDs[next:]...)
+		for i, id := range seq {
+			if err := tx.Model(&Unit{}).Where("id = ?", id).Update("position", i+1).Error; err != nil {
 				return err
 			}
 		}
@@ -253,7 +276,7 @@ func (h *Handler) SaveSlideUnits(c *gin.Context) {
 	ranges := h.s.unitRanges(ids)
 	views := make([]gin.H, len(units))
 	for i, u := range units {
-		views[i] = gin.H{"id": u.ID, "position": u.Position, "title": u.Title, "slides": ranges[u.ID]}
+		views[i] = gin.H{"id": u.ID, "position": u.Position, "title": u.Title, "kind": u.Kind, "slides": ranges[u.ID]}
 	}
 	c.JSON(http.StatusOK, gin.H{"data": views})
 }

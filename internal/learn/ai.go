@@ -19,6 +19,7 @@ type fullAI interface {
 	AI
 	Enricher
 	Examiner
+	Explainer
 }
 
 // FallbackAI uses Primary, and Backup for any call Primary refuses because
@@ -81,6 +82,22 @@ func (f FallbackAI) MarkAnswers(ctx context.Context, in MarkInput) (map[int]AIMa
 		return f.Backup.MarkAnswers(ctx, in)
 	}
 	return m, u, err
+}
+
+func (f FallbackAI) FollowUps(ctx context.Context, in FollowupInput) ([]string, Usage, error) {
+	q, u, err := f.Primary.FollowUps(ctx, in)
+	if errors.Is(err, ErrAICredit) {
+		return f.Backup.FollowUps(ctx, in)
+	}
+	return q, u, err
+}
+
+func (f FallbackAI) Consistency(ctx context.Context, in ConsistencyInput) (ConsistencyResult, Usage, error) {
+	r, u, err := f.Primary.Consistency(ctx, in)
+	if errors.Is(err, ErrAICredit) {
+		return f.Backup.Consistency(ctx, in)
+	}
+	return r, u, err
 }
 
 // AI is everything the course builder asks a model to do. Each task can use

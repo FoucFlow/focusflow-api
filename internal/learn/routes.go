@@ -15,6 +15,11 @@ func (h *Handler) Routes(r *gin.Engine) {
 	up.POST("/:id", h.DirectUpload)
 
 	g := r.Group("/api/learn", auth.AuthMiddleware())
+	r.GET("/api/certificates/:code", h.VerifyCertificate) // public check
+	g.GET("/quiz-template.csv", func(c *gin.Context) {
+		c.Header("Content-Disposition", `attachment; filename="focusflow-quiz-template.csv"`)
+		c.Data(200, "text/csv; charset=utf-8", []byte(CSVTemplate))
+	})
 
 	// Admin: AI usage against provider quotas
 	r.GET("/api/admin/ai/quota", auth.AuthMiddleware(), auth.RequireRole(auth.RoleAdmin), h.AIQuota)
@@ -43,6 +48,13 @@ func (h *Handler) Routes(r *gin.Engine) {
 	g.PUT("/courses/:id/build-mode", h.SetBuildMode)
 	g.PUT("/courses/:id/slide-units", h.SaveSlideUnits)
 	g.GET("/units/:uid/pages", h.UnitPages)
+	g.POST("/courses/:id/quizzes", h.CreateQuiz)
+	g.PUT("/units/:uid/quiz", h.UpdateQuiz)
+	g.POST("/units/:uid/questions/import", h.ImportQuestions)
+	g.POST("/attempts/:aid/check", h.CheckAnswer)
+	g.POST("/attempts/:aid/explain", h.ExplainAnswers)
+	g.POST("/attempts/:aid/snapshots", h.AddSnapshot)
+	g.GET("/attempts/:aid/snapshots/:n", h.GetSnapshot)
 
 	g.GET("/units/:uid", h.GetUnit)
 	g.PUT("/units/:uid", h.UpdateUnit)

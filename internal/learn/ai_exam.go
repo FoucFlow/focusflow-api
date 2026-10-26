@@ -51,22 +51,24 @@ type AIMark struct {
 	Feedback string  `json:"feedback"`
 }
 
-const questionsSystem = `You write test questions for one unit of a course, for beginners studying on their own. You get the unit's concepts and the lesson the learners studied for each. Every question must be answerable from these lessons alone; never test outside facts.
+const questionsSystem = `You write test questions for one unit of a course. You get the unit's concepts and the material the learners studied for each (lessons, or the teacher's slides word for word). Every question must be answerable from this material alone; never test outside facts.
 Write a pool of varied questions (different learners get different random draws, so avoid near-duplicates):
-- About 60% "mcq": one clearly correct option and 3 plausible wrong options built from real misconceptions. No "all of the above" or "none of the above". Options of similar length.
-- About 30% "short": answerable in one or two sentences.
+- About 45% "mcq": one clearly correct option and 3 plausible wrong options built from real misconceptions. No "all of the above" or "none of the above". Options of similar length.
+- About 10% "multi": 4 or 5 options of which 2 or 3 are correct (give their indexes in "corrects").
+- About 10% "truefalse": a statement; options ["True","False"], correct 0 if true, 1 if false.
+- About 25% "short": answerable in one or two sentences.
 - About 10% "explain": the learner explains why or how in a short paragraph, or applies the idea to a new small case.
 Test understanding and application, not memorised wording. Cover every concept.
 For each question give:
 - concept: the number of the concept it tests (1 = first)
-- kind: "mcq", "short" or "explain"
+- kind: "mcq", "multi", "truefalse", "short" or "explain"
 - prompt: the question (Markdown allowed, e.g. code)
-- options and correct: for mcq, the options and the index (0-based) of the correct one; for the others, an empty list and 0
+- options and correct: for mcq and truefalse, the options and the index (0-based) of the correct one; for multi, the options and "corrects" (list of 0-based indexes); for the others, an empty list and 0
 - answer_guide: for mcq, one sentence on why the correct option is right; for the others, what a full-mark answer must contain, as a short list of key points
 Write in the course language.
 
 Answer with ONLY a JSON object, no other text, in exactly this shape:
-{"questions":[{"concept":1,"kind":"mcq","prompt":"...","options":["...","...","...","..."],"correct":0,"answer_guide":"..."}]}`
+{"questions":[{"concept":1,"kind":"mcq","prompt":"...","options":["...","...","...","..."],"correct":0,"corrects":[],"answer_guide":"..."}]}`
 
 const markSystem = `You mark learners' written answers in a unit test. For each item you get the question, the answer guide (the key points a full-mark answer contains) and the learner's answer.
 Give each answer a mark: 1 (all key points, correct), 0.5 (partly correct or missing an important point), or 0 (wrong, empty or off-topic). Judge understanding, not spelling, grammar or language; an answer in another language than the course is fine if it is correct.
@@ -101,6 +103,7 @@ type rawQuestions struct {
 		Prompt      string   `json:"prompt"`
 		Options     []string `json:"options"`
 		Correct     int      `json:"correct"`
+		Corrects    []int    `json:"corrects"`
 		AnswerGuide string   `json:"answer_guide"`
 	} `json:"questions"`
 }
@@ -116,7 +119,7 @@ func cleanQuestions(raw rawQuestions, concepts []ExamConcept) ([]Question, error
 		if q.Prompt == "" {
 			continue
 		}
-		item := Question{Kind: q.Kind, Prompt: q.Prompt, AnswerGuide: q.AnswerGuide, Options: []string{}, Source: "ai"}
+		item := Question{Kind: q.Kind, Prompt: q.Prompt, AnswerGuide: q.AnswerGuide, Options: []string{}, Corrects: []int{}, Source: "ai"}
 		if q.Concept >= 1 && q.Concept <= len(concepts) {
 			item.Concept = clip(concepts[q.Concept-1].Title, 255)
 		}
@@ -129,6 +132,19 @@ func cleanQuestions(raw rawQuestions, concepts []ExamConcept) ([]Question, error
 				item.Options = append(item.Options, strings.TrimSpace(o))
 			}
 			item.Correct = q.Correct
+		case QuestionMulti:
+			if validOptions(q.Options, 0) != nil || validCorrects(q.Corrects, len(q.Options)) != "" {
+				continue
+			}
+			for _, o := range q.Options {
+				item.Options = append(item.Options, strings.TrimSpace(o))
+			}
+			item.Corrects, item.Correct = q.Corrects, q.Corrects[0]
+		case QuestionTrueFalse:
+			if q.Correct != 0 && q.Correct != 1 {
+				continue
+			}
+			item.Options, item.Correct = []string{"True", "False"}, q.Correct
 		case QuestionShort, QuestionExplain:
 			if q.AnswerGuide == "" {
 				continue // cannot be marked without a guide
@@ -273,6 +289,10 @@ func (FakeAI) WriteQuestions(_ context.Context, in QuestionsInput) ([]Question, 
 		}
 		qs = append(qs, Question{Kind: QuestionShort, Concept: c.Title, Source: "ai", Options: []string{},
 			Prompt: "In one sentence, what is " + c.Title + "?", AnswerGuide: "- mentions the word \"correct\""})
+		qs = append(qs, Question{Kind: QuestionTrueFalse, Concept: c.Title, Source: "ai", Options: []string{"True", "False"},
+			Prompt: c.Title + " is covered in this unit.", Correct: 0, AnswerGuide: "It is."})
+		qs = append(qs, Question{Kind: QuestionMulti, Concept: c.Title, Source: "ai", Correct: 0, Corrects: []int{0, 2},
+			Prompt: "Which are true about " + c.Title + "?", Options: []string{"Right A", "Wrong B", "Right C", "Wrong D"}, AnswerGuide: "A and C."})
 	}
 	return qs, fakeUsage, nil
 }

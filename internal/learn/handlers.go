@@ -533,9 +533,20 @@ func (h *Handler) GetCourse(c *gin.Context) {
 		}
 		views[i] = unitView{Unit: u, Locked: !enrolled || !open[u.ID], Completed: done[u.ID], ConceptNames: names, Slides: ranges[u.ID], Test: tests[u.ID]}
 	}
+	// Quizzes not ready yet are not shown to learners
+	ready := h.s.readyQuizzes(units)
+	shown := views[:0]
+	for _, v := range views {
+		if v.Kind != "quiz" || ready[v.ID] {
+			shown = append(shown, v)
+		}
+	}
+	views = shown
+	doneN, totalN, _ := h.s.courseProgressFor(me, id)
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
 		"role": "learner", "course": course, "units": views, "enrolled": enrolled,
-		"completed_units": len(done), "total_units": len(units), "more_coming": h.s.moreComing(id),
+		"completed_units": doneN, "total_units": totalN, "more_coming": h.s.moreComing(id),
+		"certificate": h.s.certificateFor(me, id),
 	}})
 }
 
@@ -871,10 +882,9 @@ func (h *Handler) CompleteUnit(c *gin.Context) {
 		fail(c, http.StatusForbidden, err.Error())
 		return
 	}
-	done := h.s.completedUnits(me, u.CourseID)
-	total := len(h.s.units(u.CourseID))
-	c.JSON(http.StatusOK, gin.H{"message": "Unit finished.", "completed_units": len(done), "total_units": total,
-		"course_completed": total > 0 && len(done) >= total})
+	done, total, finished := h.s.courseProgressFor(me, u.CourseID)
+	c.JSON(http.StatusOK, gin.H{"message": "Unit finished.", "completed_units": done, "total_units": total,
+		"course_completed": finished, "certificate": h.s.certificateFor(me, u.CourseID)})
 }
 
 // GET /api/learn/me: courses I created and courses I joined, with progress.
@@ -897,7 +907,7 @@ func (h *Handler) Me(c *gin.Context) {
 			continue
 		}
 		joined = append(joined, joinedRow{Course: e.Course,
-			CompletedUnits: len(h.s.completedUnits(me, e.CourseID)), TotalUnits: len(h.s.units(e.CourseID))})
+			CompletedUnits: doneOf(h.s, me, e.CourseID), TotalUnits: totalOf(h.s, me, e.CourseID)})
 	}
 	progress := map[int]*BuildProgress{}
 	for i := range created {

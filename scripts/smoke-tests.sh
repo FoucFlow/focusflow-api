@@ -43,7 +43,7 @@ t "cannot turn the test on without questions" 422 "${T[@]}" -X PUT "${J[@]}" -d 
 t "learner cannot write questions" 403 "${L[@]}" -X POST $B/api/learn/units/$U1/questions/generate
 t "AI writes the pool" 202 "${T[@]}" -X POST $B/api/learn/units/$U1/questions/generate
 wait_for $B/api/learn/units/$U1/test "d['data']['settings']['pool_status']=='ready'" || echo "FAIL pool not ready"
-check "  pool written (mcq + short)" "len(d['data']['questions'])==3 and {q['kind'] for q in d['data']['questions']}=={'mcq','short'}"
+check "  pool written (every kind the AI writes)" "len(d['data']['questions'])==5 and {q['kind'] for q in d['data']['questions']}=={'mcq','short','truefalse','multi'}"
 Q1=$(py "[q['id'] for q in d['data']['questions'] if q['kind']=='mcq'][0]")
 t "mcq with one option refused" 422 "${T[@]}" "${J[@]}" -d '{"kind":"mcq","prompt":"x?","options":["a"],"correct":0}' $B/api/learn/units/$U1/questions
 t "mcq with the correct index out of range refused" 422 "${T[@]}" "${J[@]}" -d '{"kind":"mcq","prompt":"x?","options":["a","b"],"correct":2}' $B/api/learn/units/$U1/questions
@@ -55,7 +55,7 @@ check "  becomes 'edited'" "d['data']['source']=='edited' and d['data']['prompt'
 t "learner cannot edit questions" 403 "${L[@]}" -X PUT "${J[@]}" -d '{"prompt":"hack"}' $B/api/learn/questions/$Q1
 t "AI writes the pool again" 202 "${T[@]}" -X POST $B/api/learn/units/$U1/questions/generate
 wait_for $B/api/learn/units/$U1/test "d['data']['settings']['pool_status']=='ready'" || echo "FAIL pool not ready"
-check "  edited and manual questions kept, AI ones replaced" "len(d['data']['questions'])==5 and sum(q['source']=='edited' for q in d['data']['questions'])==1 and sum(q['source']=='manual' for q in d['data']['questions'])==1"
+check "  edited and manual questions kept, AI ones replaced" "len(d['data']['questions'])==7 and sum(q['source']=='edited' for q in d['data']['questions'])==1 and sum(q['source']=='manual' for q in d['data']['questions'])==1"
 t "bad settings refused" 422 "${T[@]}" -X PUT "${J[@]}" -d '{"pass_mark":0}' $B/api/learn/units/$U1/test
 t "settings: 3 questions, 2 attempts, 10 min, test on" 200 "${T[@]}" -X PUT "${J[@]}" -d '{"enabled":true,"questions_per_test":3,"max_attempts":2,"time_limit_minutes":10,"pass_mark":60}' $B/api/learn/units/$U1/test
 check "  saved" "d['data']['enabled'] and d['data']['questions_per_test']==3 and d['data']['track_tab'] and d['data']['track_paste']"
@@ -64,7 +64,7 @@ for i in 1 2; do t "unit 2 question $i" 201 "${T[@]}" "${J[@]}" -d "{\"kind\":\"
 t "unit 2 written question" 201 "${T[@]}" "${J[@]}" -d '{"kind":"short","prompt":"Say it","answer_guide":"- says correct"}' $B/api/learn/units/$U2/questions
 t "unit 2 test on, teacher review" 200 "${T[@]}" -X PUT "${J[@]}" -d '{"enabled":true,"questions_per_test":3,"teacher_review":true,"time_limit_minutes":0}' $B/api/learn/units/$U2/test
 t "builder view shows the tests" 200 "${T[@]}" $B/api/learn/courses/$CID
-check "  unit summaries" "d['data']['units'][0]['test']['enabled'] and d['data']['units'][0]['test']['questions']==5"
+check "  unit summaries" "d['data']['units'][0]['test']['enabled'] and d['data']['units'][0]['test']['questions']>=5"
 
 t "publish" 200 "${T[@]}" "${J[@]}" -d '{"visibility":"public","confirm_rights":true}' $B/api/learn/courses/$CID/publish
 t "learner joins" 200 "${L[@]}" -X POST $B/api/learn/courses/$CID/join
@@ -78,7 +78,7 @@ t "creator cannot start a test" 422 "${T[@]}" -X POST $B/api/learn/units/$U1/tes
 
 # ── learner: attempt 1 (fails) ──
 t "learner test page" 200 "${L[@]}" $B/api/learn/units/$U1/test
-check "  settings shown before starting" "d['data']['can_start'] and d['data']['settings']=={'questions':3,'pass_mark':60,'time_limit_minutes':10,'max_attempts':2,'teacher_review':False,'track_tab':True,'track_paste':True}"
+check "  settings shown before starting" "d['data']['can_start'] and {k:d['data']['settings'][k] for k in ('questions','pass_mark','time_limit_minutes','max_attempts','teacher_review','track_tab','track_paste')}=={'questions':3,'pass_mark':60,'time_limit_minutes':10,'max_attempts':2,'teacher_review':False,'track_tab':True,'track_paste':True}"
 t "start attempt 1" 200 "${L[@]}" -X POST $B/api/learn/units/$U1/test/start
 A1=$(py "d['data']['id']")
 check "  3 questions with a deadline" "len(d['data']['items'])==3 and d['data']['deadline'] and d['data']['status']=='in_progress'"
@@ -91,8 +91,8 @@ t "creator cannot answer it" 403 "${T[@]}" "${J[@]}" -X PUT -d '{"answers":[]}' 
 t "creator sees the attempt with answers" 200 "${T[@]}" $B/api/learn/attempts/$A1
 check "  with evidence (unknown signal dropped)" "d['data']['evidence']=={'tab_hidden':1,'paste':1} and d['data']['learner']['name']=='learner'"
 # Wrong answers on purpose: every mcq gets an option that is not the right one
-WRONG=$(py "json.dumps([{'index':i,'choice':(it['correct']+1)%len(it['options'])} if it['kind']=='mcq' else {'index':i,'answer':'no idea'} for i,it in enumerate(d['data']['attempt']['items'])])")
-RIGHT=$(py "json.dumps([{'index':i,'choice':it['correct']} if it['kind']=='mcq' else {'index':i,'answer':'this is correct'} for i,it in enumerate(d['data']['attempt']['items'])])")
+WRONG=$(py "json.dumps([{'index':i,'choices':[]} if it['kind']=='multi' else {'index':i,'choice':(it['correct']+1)%len(it['options'])} if it['kind'] in ('mcq','truefalse') else {'index':i,'answer':'no idea'} for i,it in enumerate(d['data']['attempt']['items'])])")
+RIGHT=$(py "json.dumps([{'index':i,'choices':it['corrects']} if it['kind']=='multi' else {'index':i,'choice':it['correct']} if it['kind'] in ('mcq','truefalse') else {'index':i,'answer':'this is correct'} for i,it in enumerate(d['data']['attempt']['items'])])")
 t "autosave answers" 200 "${L[@]}" -X PUT "${J[@]}" -d "{\"answers\":$WRONG}" $B/api/learn/attempts/$A1/answers
 t "submit attempt 1" 200 "${L[@]}" -X POST "${J[@]}" -d "{\"answers\":$WRONG}" $B/api/learn/attempts/$A1/submit
 curl -s "${L[@]}" -o "$D/out" $B/api/learn/attempts/$A1
@@ -107,7 +107,7 @@ t "start attempt 2" 200 "${L[@]}" -X POST $B/api/learn/units/$U1/test/start
 A2=$(py "d['data']['id']")
 check "  a new attempt, number 2" "d['data']['id']!=$A1 and d['data']['number']==2"
 curl -s "${T[@]}" -o "$D/out" $B/api/learn/attempts/$A2
-RIGHT=$(py "json.dumps([{'index':i,'choice':it['correct']} if it['kind']=='mcq' else {'index':i,'answer':'this is correct'} for i,it in enumerate(d['data']['attempt']['items'])])")
+RIGHT=$(py "json.dumps([{'index':i,'choices':it['corrects']} if it['kind']=='multi' else {'index':i,'choice':it['correct']} if it['kind'] in ('mcq','truefalse') else {'index':i,'answer':'this is correct'} for i,it in enumerate(d['data']['attempt']['items'])])")
 t "submit attempt 2" 200 "${L[@]}" -X POST "${J[@]}" -d "{\"answers\":$RIGHT}" $B/api/learn/attempts/$A2/submit
 for _ in $(seq 1 15); do curl -s "${L[@]}" -o "$D/out" $B/api/learn/attempts/$A2; [ "$(py "d['data']['status']")" = done ] && break; sleep 1; done
 check "  passed with 100%" "d['data']['status']=='done' and d['data']['score_percent']==100 and d['data']['passed']"
@@ -120,7 +120,7 @@ t "a 3rd attempt is refused" 422 "${L[@]}" -X POST $B/api/learn/units/$U1/test/s
 t "start unit 2 test" 200 "${L[@]}" -X POST $B/api/learn/units/$U2/test/start
 A3=$(py "d['data']['id']")
 curl -s "${T[@]}" -o "$D/out" $B/api/learn/attempts/$A3
-RIGHT=$(py "json.dumps([{'index':i,'choice':it['correct']} if it['kind']=='mcq' else {'index':i,'answer':'this is correct'} for i,it in enumerate(d['data']['attempt']['items'])])")
+RIGHT=$(py "json.dumps([{'index':i,'choices':it['corrects']} if it['kind']=='multi' else {'index':i,'choice':it['correct']} if it['kind'] in ('mcq','truefalse') else {'index':i,'answer':'this is correct'} for i,it in enumerate(d['data']['attempt']['items'])])")
 WIDX=$(py "[i for i,it in enumerate(d['data']['attempt']['items']) if it['kind']=='short'][0]")
 t "submit unit 2 test" 200 "${L[@]}" -X POST "${J[@]}" -d "{\"answers\":$RIGHT}" $B/api/learn/attempts/$A3/submit
 for _ in $(seq 1 15); do curl -s "${L[@]}" -o "$D/out" $B/api/learn/attempts/$A3; [ "$(py "d['data']['status']")" = review ] && break; sleep 1; done

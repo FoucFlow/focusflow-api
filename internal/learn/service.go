@@ -997,8 +997,14 @@ func mergeInts(a, b []int) []int {
 }
 
 func (s *Service) deleteUnits(tx *gorm.DB, courseID int) error {
+	// Quizzes stay (their questions are the teacher's work); they move after
+	// the new lessons, which the creator can reorder.
+	if err := tx.Model(&Unit{}).Where("course_id = ? AND kind = ?", courseID, "quiz").
+		Update("position", gorm.Expr("position + 10000")).Error; err != nil {
+		return err
+	}
 	var ids []int
-	tx.Model(&Unit{}).Where("course_id = ?", courseID).Pluck("id", &ids)
+	tx.Model(&Unit{}).Where("course_id = ? AND kind <> ?", courseID, "quiz").Pluck("id", &ids)
 	if len(ids) == 0 {
 		return nil
 	}
@@ -1074,7 +1080,7 @@ func unlocked(units []Unit, done map[int]bool) map[int]bool {
 		if allBefore {
 			open[u.ID] = true
 		}
-		if !done[u.ID] {
+		if !done[u.ID] && !u.Optional { // practice or empty quizzes never block
 			allBefore = false
 		}
 	}
@@ -1096,9 +1102,13 @@ func (s *Service) Complete(userID int, u *Unit) error {
 	if s.activeTests([]int{u.ID})[u.ID] {
 		return errors.New("Pass the unit test to finish this unit.")
 	}
-	return s.db.Where(UnitProgress{UserID: userID, UnitID: u.ID}).
+	if err := s.db.Where(UnitProgress{UserID: userID, UnitID: u.ID}).
 		Attrs(UnitProgress{CourseID: u.CourseID, CompletedAt: time.Now()}).
-		FirstOrCreate(&UnitProgress{}).Error
+		FirstOrCreate(&UnitProgress{}).Error; err != nil {
+		return err
+	}
+	s.maybeCertify(userID, u.CourseID)
+	return nil
 }
 
 // covers returns a card image per course: the first YouTube video's thumbnail
