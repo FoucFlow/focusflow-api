@@ -58,7 +58,7 @@ wait_for $B/api/learn/units/$U1/test "d['data']['settings']['pool_status']=='rea
 check "  edited and manual questions kept, AI ones replaced" "len(d['data']['questions'])==7 and sum(q['source']=='edited' for q in d['data']['questions'])==1 and sum(q['source']=='manual' for q in d['data']['questions'])==1"
 t "bad settings refused" 422 "${T[@]}" -X PUT "${J[@]}" -d '{"pass_mark":0}' $B/api/learn/units/$U1/test
 t "settings: 3 questions, 2 attempts, 10 min, test on" 200 "${T[@]}" -X PUT "${J[@]}" -d '{"enabled":true,"questions_per_test":3,"max_attempts":2,"time_limit_minutes":10,"pass_mark":60}' $B/api/learn/units/$U1/test
-check "  saved" "d['data']['enabled'] and d['data']['questions_per_test']==3 and d['data']['track_tab'] and d['data']['track_paste']"
+check "  saved" "d['data']['enabled'] and d['data']['questions_per_test']==3 and not d['data']['track_tab'] and not d['data']['track_paste']"
 # Unit 2: a manual pool (the free plan counts AI runs), teacher review on
 for i in 1 2; do t "unit 2 question $i" 201 "${T[@]}" "${J[@]}" -d "{\"kind\":\"mcq\",\"prompt\":\"U2 q$i?\",\"options\":[\"Right answer\",\"No\",\"Never\"],\"correct\":0}" $B/api/learn/units/$U2/questions; done
 t "unit 2 written question" 201 "${T[@]}" "${J[@]}" -d '{"kind":"short","prompt":"Say it","answer_guide":"- says correct"}' $B/api/learn/units/$U2/questions
@@ -78,7 +78,7 @@ t "creator cannot start a test" 422 "${T[@]}" -X POST $B/api/learn/units/$U1/tes
 
 # ── learner: attempt 1 (fails) ──
 t "learner test page" 200 "${L[@]}" $B/api/learn/units/$U1/test
-check "  settings shown before starting" "d['data']['can_start'] and {k:d['data']['settings'][k] for k in ('questions','pass_mark','time_limit_minutes','max_attempts','teacher_review','track_tab','track_paste')}=={'questions':3,'pass_mark':60,'time_limit_minutes':10,'max_attempts':2,'teacher_review':False,'track_tab':True,'track_paste':True}"
+check "  settings shown before starting" "d['data']['can_start'] and {k:d['data']['settings'][k] for k in ('questions','pass_mark','time_limit_minutes','max_attempts','teacher_review','track_tab','track_paste')}=={'questions':3,'pass_mark':60,'time_limit_minutes':10,'max_attempts':2,'teacher_review':False,'track_tab':False,'track_paste':False}"
 t "start attempt 1" 200 "${L[@]}" -X POST $B/api/learn/units/$U1/test/start
 A1=$(py "d['data']['id']")
 check "  3 questions with a deadline" "len(d['data']['items'])==3 and d['data']['deadline'] and d['data']['status']=='in_progress'"

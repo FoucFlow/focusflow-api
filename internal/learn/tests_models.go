@@ -85,9 +85,12 @@ type TestSettings struct {
 
 func (TestSettings) TableName() string { return "unit_tests" }
 
+// defaultTestSettings: a new test starts at the Standard level (F2.12).
 func defaultTestSettings(unitID, courseID int) TestSettings {
-	return TestSettings{UnitID: unitID, CourseID: courseID, QuestionsPerTest: 8, PassMark: 60,
-		TimeLimitMinutes: 15, MaxAttempts: 3, TrackTab: true, TrackPaste: true, PoolStatus: StatusIdle}
+	st := TestSettings{UnitID: unitID, CourseID: courseID, QuestionsPerTest: 8, PassMark: 60,
+		TimeLimitMinutes: 15, PoolStatus: StatusIdle}
+	_ = applyLevel(&st, LevelStandard)
+	return st
 }
 
 // Attempt is one learner's sitting of a unit test. The drawn questions are
