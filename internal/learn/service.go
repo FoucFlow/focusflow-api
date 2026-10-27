@@ -15,6 +15,7 @@ import (
 	"time"
 
 	coursemodels "focusflow-api/internal/course/models"
+	"focusflow-api/internal/platform/mailer"
 	"focusflow-api/internal/platform/storage"
 
 	"gorm.io/gorm"
@@ -60,6 +61,9 @@ var DefaultLimits = Limits{CoursesPerUser: 2, MaterialsPerCourse: 15, MaxFileByt
 
 type Service struct {
 	db          *gorm.DB
+	joinCheck   func(c *coursemodels.Course, userID int) string // institution roster rule (institutions.go)
+	mail        mailer.Mailer                                   // nil: no email (SetMailer)
+	frontendURL string
 	ai          AI
 	videoAI     VideoAI       // nil: videos are described by their title and note only
 	refs        Enricher      // nil: no "expand your knowledge" references

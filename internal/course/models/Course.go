@@ -38,6 +38,10 @@ type Course struct {
 	// slides = "use my slides as written" (AI only structures and finds
 	// references); ai = "let AI write lessons" (FEATURES.md F1.10)
 	BuildMode string `json:"build_mode" gorm:"size:16;not null;default:ai"`
+	// Invite link (F4.1): anyone signed in with the link can join, also a
+	// private course. The code is shown to the creator only.
+	InviteCode    string `json:"-" gorm:"size:16;index"`
+	InviteEnabled bool   `json:"-"`
 
 	Enrollments     []Enrollment `json:"enrollments,omitempty" gorm:"-"`
 	EnrollmentCount int          `json:"enrollment_count" gorm:"-"`

@@ -181,8 +181,8 @@ func (AIUsage) TableName() string { return "ai_usage" }
 
 // Models lists the tables this package owns, for AutoMigrate.
 func Models() []any {
-	return []any{&Material{}, &Unit{}, &Concept{}, &UnitMaterial{}, &UnitProgress{}, &AIUsage{},
-		&Question{}, &TestSettings{}, &Attempt{}, &MarkChange{}, &AICall{}, &SlidePage{}, &Certificate{}}
+	return append([]any{&Material{}, &Unit{}, &Concept{}, &UnitMaterial{}, &UnitProgress{}, &AIUsage{},
+		&Question{}, &TestSettings{}, &Attempt{}, &MarkChange{}, &AICall{}, &SlidePage{}, &Certificate{}}, institutionModels()...)
 }
 
 // BeforeCreate puts a new material after the course's others.

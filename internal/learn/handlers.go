@@ -547,6 +547,7 @@ func (h *Handler) GetCourse(c *gin.Context) {
 		"role": "learner", "course": course, "units": views, "enrolled": enrolled,
 		"completed_units": doneN, "total_units": totalN, "more_coming": h.s.moreComing(id),
 		"certificate": h.s.certificateFor(me, id),
+		"consent":     h.s.consentFor(id, me), // institution courses ask learners first (F4.4)
 	}})
 }
 
@@ -817,6 +818,10 @@ func (h *Handler) Join(c *gin.Context) {
 	me := c.GetInt(auth.CtxUserID)
 	if course.UserId == me {
 		fail(c, http.StatusUnprocessableEntity, "You created this course.")
+		return
+	}
+	if msg := h.s.joinAllowed(course, me); msg != "" {
+		fail(c, http.StatusForbidden, msg)
 		return
 	}
 	e := coursemodels.Enrollment{CourseID: id, UserID: me}

@@ -95,7 +95,7 @@ func main() {
 
 	auth.NewHandler(authSvc, cfg, mail).Routes(r)
 	courseroutes.CourseRoutes(r, gdb)
-	wireLearn(r, gdb, cfg)
+	wireLearn(r, gdb, cfg, mail)
 	wireMaterials(r, gdb, cfg)
 
 	srv := &http.Server{
@@ -211,7 +211,7 @@ func wireMaterials(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 }
 
 // wireLearn sets up the course builder (FEATURES.md step 1).
-func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
+func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config, mail mailer.Mailer) {
 	ai, provider := chooseAI(cfg)
 	slog.Info("AI provider", "provider", provider)
 	limits := learn.Limits{
@@ -234,6 +234,7 @@ func wireLearn(r *gin.Engine, gdb *gorm.DB, cfg *config.Config) {
 		slog.Info("AI monthly budget", "usd", cfg.AIMonthlyBudgetUSD)
 	}
 	svc := learn.NewService(gdb, ai, limits, cfg.AppKey, 2)
+	svc.SetMailer(mail, cfg.FrontendURL) // roster invitations, help messages, institution members
 	// References by web search: whatever provider implements it
 	if e, ok := ai.(learn.Enricher); ok && provider != "none" {
 		svc.SetEnricher(e)
