@@ -277,7 +277,7 @@ func (h *Handler) SaveSlideUnits(c *gin.Context) {
 				return err
 			}
 		}
-		return nil
+		return renumber(tx, courseID)
 	})
 	if err != nil {
 		slog.Error("save slide units", "course", courseID, "error", err)

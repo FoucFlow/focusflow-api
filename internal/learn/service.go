@@ -935,7 +935,7 @@ func saveUnits(tx *gorm.DB, courseID, start int, outline Outline, refs map[strin
 			}
 		}
 	}
-	return nil
+	return renumber(tx, courseID)
 }
 
 // organiseInput gives each material a key ("M12") and each of its concepts

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -21,32 +22,40 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// Institutions (FEATURES.md M4: F4.3 to F4.5). A university or school has
-// admins and lecturers. A lecturer attaches a course to the institution,
+// Institutions (FEATURES.md M4: F4.3 to F4.5) work like GitHub
+// organisations. Anyone can create one and becomes its owner. Owners add
+// people by email as owners, lecturers or students, change their role or
+// remove them; everyone keeps their own free or Pro account, and anyone but
+// the last owner can leave. A lecturer attaches a course to the institution,
 // brings in the class roster and invites the class. Learners give consent
-// before their results are used; an institution admin approves results
+// before their results are used; an institution owner approves results
 // access per course. Class results show who struggles with which concept,
 // and the lecturer sends each learner help they have reviewed.
 
 const (
-	OrgAdmin    = "admin"
+	OrgOwner    = "owner"
 	OrgLecturer = "lecturer"
+	OrgStudent  = "student"
+	// Institution plans: free, or the paid plan that gives owners and
+	// lecturers the higher limits (set by FocusFlow admins until payments).
+	InstFree = "free"
+	InstPaid = "institution"
 	// ConsentVersion changes when the default consent text changes.
 	ConsentVersion = "2026-10"
 )
 
-const defaultConsent = `Your teacher uses FocusFlow to see how the class is doing. If you agree, your quiz and test results in this course are shown to your teacher and to your institution's FocusFlow admins, so they can see which topics you find hard and send you help. Your name is never sent to an AI model. You can withdraw your consent at any time on the course page; your results then stop being shown.`
+const defaultConsent = `Your teacher uses FocusFlow to see how the class is doing. If you agree, your quiz and test results in this course are shown to your teacher and to your institution's owners on FocusFlow, so they can see which topics you find hard and send you help. Your name is never sent to an AI model. You can withdraw your consent at any time on the course page; your results then stop being shown.`
 
 type Institution struct {
 	ID          int       `json:"id" gorm:"primaryKey"`
 	Name        string    `json:"name" gorm:"size:255;not null"`
-	ConsentText string    `json:"consent_text" gorm:"type:text"` // empty = the default text
-	Plan        string    `json:"plan" gorm:"size:16;not null;default:pilot"`
+	ConsentText string    `json:"consent_text" gorm:"type:text"`             // empty = the default text
+	Plan        string    `json:"plan" gorm:"size:16;not null;default:free"` // free | institution
 	CreatedBy   int       `json:"created_by" gorm:"not null"`
 	CreatedAt   time.Time `json:"created_at"`
 }
 
-// InstitutionMember: an admin or lecturer. Email-only rows are people added
+// InstitutionMember: an owner, lecturer or student. Email-only rows are people added
 // before they have an account; they link on their first visit.
 type InstitutionMember struct {
 	ID            int       `json:"id" gorm:"primaryKey"`
@@ -105,6 +114,23 @@ func institutionModels() []any {
 }
 
 // SetMailer turns on email (roster invitations, help messages).
+// MigrateInstitutions renames the first roles and plans (admin → owner,
+// pilot → free). It is safe to run on every start.
+func MigrateInstitutions(db *gorm.DB) error {
+	if err := db.Model(&InstitutionMember{}).Where("role = ?", "admin").Update("role", OrgOwner).Error; err != nil {
+		return err
+	}
+	return db.Model(&Institution{}).Where("plan = ?", "pilot").Update("plan", InstFree).Error
+}
+
+var orgRoles = map[string]string{OrgOwner: "an owner", OrgLecturer: "a lecturer", OrgStudent: "a student"}
+
+func (s *Service) owners(instID int) int64 {
+	var n int64
+	s.db.Model(&InstitutionMember{}).Where("institution_id = ? AND role = ?", instID, OrgOwner).Count(&n)
+	return n
+}
+
 func (s *Service) SetMailer(m mailer.Mailer, frontendURL string) {
 	s.mail, s.frontendURL = m, strings.TrimRight(frontendURL, "/")
 	s.joinCheck = s.rosterCheck
@@ -139,7 +165,9 @@ func (s *Service) orgRole(instID, userID int) string {
 	return m.Role
 }
 
-func (h *Handler) instFor(c *gin.Context, adminOnly bool) (*Institution, string, bool) {
+// instFor loads the institution for a member; with roles, only those roles
+// may go on. Site admins act as owners.
+func (h *Handler) instFor(c *gin.Context, roles ...string) (*Institution, string, bool) {
 	iid, ok := paramID(c, "iid")
 	if !ok {
 		return nil, "", false
@@ -151,16 +179,24 @@ func (h *Handler) instFor(c *gin.Context, adminOnly bool) (*Institution, string,
 	}
 	role := h.s.orgRole(inst.ID, c.GetInt(auth.CtxUserID))
 	if isAdmin(c) {
-		role = OrgAdmin
+		role = OrgOwner
 	}
-	if role == "" || (adminOnly && role != OrgAdmin) {
-		fail(c, http.StatusForbidden, map[bool]string{true: "Only the institution's admins can do this.", false: "You are not a member of this institution."}[role != ""])
+	if role == "" {
+		fail(c, http.StatusForbidden, "You are not a member of this institution.")
+		return nil, "", false
+	}
+	if len(roles) > 0 && !slices.Contains(roles, role) {
+		msg := "Only the institution's owners can do this."
+		if slices.Contains(roles, OrgLecturer) {
+			msg = "Only the institution's owners and lecturers can do this."
+		}
+		fail(c, http.StatusForbidden, msg)
 		return nil, "", false
 	}
 	return &inst, role, true
 }
 
-// POST /api/learn/institutions {name}: the creator becomes its first admin.
+// POST /api/learn/institutions {name}: the creator becomes its first owner.
 func (h *Handler) CreateInstitution(c *gin.Context) {
 	var in struct {
 		Name string `json:"name"`
@@ -177,7 +213,7 @@ func (h *Handler) CreateInstitution(c *gin.Context) {
 		if err := tx.Create(&inst).Error; err != nil {
 			return err
 		}
-		return tx.Create(&InstitutionMember{InstitutionID: inst.ID, Email: h.s.userEmail(me), UserID: &me, Role: OrgAdmin}).Error
+		return tx.Create(&InstitutionMember{InstitutionID: inst.ID, Email: h.s.userEmail(me), UserID: &me, Role: OrgOwner}).Error
 	})
 	if err != nil {
 		fail(c, http.StatusInternalServerError, "Could not create the institution.")
@@ -205,12 +241,29 @@ func (h *Handler) MyInstitutions(c *gin.Context) {
 
 // GET /api/learn/institutions/:iid: members, courses and my role.
 func (h *Handler) GetInstitution(c *gin.Context) {
-	inst, role, ok := h.instFor(c, false)
+	inst, role, ok := h.instFor(c)
 	if !ok {
 		return
 	}
+	// Students see the owners and lecturers, without email addresses.
 	members := []InstitutionMember{}
-	h.s.db.Where("institution_id = ?", inst.ID).Order("role, email").Find(&members)
+	q := h.s.db.Where("institution_id = ?", inst.ID)
+	if role == OrgStudent {
+		q = q.Where("role <> ? AND user_id IS NOT NULL", OrgStudent)
+	}
+	q.Order("CASE role WHEN 'owner' THEN 0 WHEN 'lecturer' THEN 1 ELSE 2 END, email").Find(&members)
+	me := c.GetInt(auth.CtxUserID)
+	var myID int
+	for _, m := range members {
+		if m.UserID != nil && *m.UserID == me {
+			myID = m.ID
+		}
+	}
+	if role == OrgStudent {
+		for i := range members {
+			members[i].Email = ""
+		}
+	}
 	type memberView struct {
 		InstitutionMember
 		Name string `json:"name"`
@@ -249,12 +302,22 @@ func (h *Handler) GetInstitution(c *gin.Context) {
 	if text == "" {
 		text = defaultConsent
 	}
-	c.JSON(http.StatusOK, gin.H{"data": gin.H{"institution": inst, "role": role, "members": views, "courses": courses, "consent_text": text}})
+	var counts []struct {
+		Role string `json:"role"`
+		N    int    `json:"n"`
+	}
+	h.s.db.Model(&InstitutionMember{}).Select("role, COUNT(*) AS n").Where("institution_id = ?", inst.ID).Group("role").Scan(&counts)
+	byRole := map[string]int{OrgOwner: 0, OrgLecturer: 0, OrgStudent: 0}
+	for _, r := range counts {
+		byRole[r.Role] = r.N
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"institution": inst, "role": role, "my_member_id": myID, "members": views,
+		"counts": byRole, "courses": courses, "consent_text": text}})
 }
 
-// PUT /api/learn/institutions/:iid {name?, consent_text?} (admin)
+// PUT /api/learn/institutions/:iid {name?, consent_text?} (owner)
 func (h *Handler) UpdateInstitution(c *gin.Context) {
-	inst, _, ok := h.instFor(c, true)
+	inst, _, ok := h.instFor(c, OrgOwner)
 	if !ok {
 		return
 	}
@@ -278,9 +341,9 @@ func (h *Handler) UpdateInstitution(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": inst})
 }
 
-// POST /api/learn/institutions/:iid/members {email, role} (admin)
+// POST /api/learn/institutions/:iid/members {email, role} (owner)
 func (h *Handler) AddMember(c *gin.Context) {
-	inst, _, ok := h.instFor(c, true)
+	inst, _, ok := h.instFor(c, OrgOwner)
 	if !ok {
 		return
 	}
@@ -294,8 +357,14 @@ func (h *Handler) AddMember(c *gin.Context) {
 		fail(c, http.StatusUnprocessableEntity, "Enter a valid email address.")
 		return
 	}
-	if in.Role != OrgAdmin && in.Role != OrgLecturer {
-		fail(c, http.StatusUnprocessableEntity, "role must be admin or lecturer.")
+	if orgRoles[in.Role] == "" {
+		fail(c, http.StatusUnprocessableEntity, "role must be owner, lecturer or student.")
+		return
+	}
+	var old InstitutionMember
+	if h.s.db.Where("institution_id = ? AND email = ?", inst.ID, email).First(&old).Error == nil &&
+		old.Role == OrgOwner && in.Role != OrgOwner && h.s.owners(inst.ID) <= 1 {
+		fail(c, http.StatusConflict, "An institution needs at least one owner.")
 		return
 	}
 	m := InstitutionMember{InstitutionID: inst.ID, Email: email, Role: in.Role}
@@ -311,7 +380,7 @@ func (h *Handler) AddMember(c *gin.Context) {
 	if h.s.mail != nil {
 		link := h.s.frontendURL + "/institutions/" + itoa(inst.ID)
 		body := fmt.Sprintf("<p>You were added to <b>%s</b> on FocusFlow as %s.</p><p><a href=\"%s\">Open FocusFlow</a> and sign in or create an account with this email address.</p>",
-			html.EscapeString(inst.Name), map[string]string{OrgAdmin: "an admin", OrgLecturer: "a lecturer"}[in.Role], link)
+			html.EscapeString(inst.Name), orgRoles[in.Role], link)
 		go func() {
 			if err := h.s.mail.Send(email, "You were added to "+inst.Name+" on FocusFlow", body); err != nil {
 				slog.Warn("member email", "error", err)
@@ -321,9 +390,104 @@ func (h *Handler) AddMember(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"data": m})
 }
 
-// DELETE /api/learn/institutions/:iid/members/:mid (admin; not the last admin)
+// PUT /api/learn/institutions/:iid/members/:mid {role} (owner; keeps one owner)
+func (h *Handler) UpdateMember(c *gin.Context) {
+	inst, _, ok := h.instFor(c, OrgOwner)
+	if !ok {
+		return
+	}
+	mid, ok := paramID(c, "mid")
+	if !ok {
+		return
+	}
+	var in struct {
+		Role string `json:"role"`
+	}
+	_ = c.ShouldBindJSON(&in)
+	if orgRoles[in.Role] == "" {
+		fail(c, http.StatusUnprocessableEntity, "role must be owner, lecturer or student.")
+		return
+	}
+	var m InstitutionMember
+	if h.s.db.Where("id = ? AND institution_id = ?", mid, inst.ID).First(&m).Error != nil {
+		fail(c, http.StatusNotFound, "Member not found.")
+		return
+	}
+	if m.Role == OrgOwner && in.Role != OrgOwner && h.s.owners(inst.ID) <= 1 {
+		fail(c, http.StatusConflict, "An institution needs at least one owner. Make someone else an owner first.")
+		return
+	}
+	h.s.db.Model(&m).Update("role", in.Role)
+	c.JSON(http.StatusOK, gin.H{"data": m})
+}
+
+// DELETE /api/learn/institutions/:iid/membership: leave (not the last owner).
+func (h *Handler) LeaveInstitution(c *gin.Context) {
+	iid, ok := paramID(c, "iid")
+	if !ok {
+		return
+	}
+	me := c.GetInt(auth.CtxUserID)
+	h.s.linkMemberships(me)
+	var m InstitutionMember
+	if h.s.db.Where("institution_id = ? AND user_id = ?", iid, me).First(&m).Error != nil {
+		fail(c, http.StatusNotFound, "You are not a member of this institution.")
+		return
+	}
+	if m.Role == OrgOwner && h.s.owners(iid) <= 1 {
+		fail(c, http.StatusConflict, "You are the only owner. Make someone else an owner before you leave.")
+		return
+	}
+	h.s.db.Delete(&m)
+	c.JSON(http.StatusOK, gin.H{"message": "You left the institution."})
+}
+
+// GET /api/admin/institutions: every institution with its plan, first owner
+// and member counts (FocusFlow admins).
+func (h *Handler) AdminInstitutions(c *gin.Context) {
+	type row struct {
+		ID        int       `json:"id"`
+		Name      string    `json:"name"`
+		Plan      string    `json:"plan"`
+		Owner     string    `json:"owner"`
+		Members   int       `json:"members"`
+		Courses   int       `json:"courses"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	rows := []row{}
+	h.s.db.Raw(`SELECT i.id, i.name, i.plan, i.created_at,
+		(SELECT m.email FROM institution_members m WHERE m.institution_id = i.id AND m.role = 'owner' ORDER BY m.id LIMIT 1) AS owner,
+		(SELECT COUNT(*) FROM institution_members m WHERE m.institution_id = i.id) AS members,
+		(SELECT COUNT(*) FROM course_classes cc WHERE cc.institution_id = i.id) AS courses
+		FROM institutions i ORDER BY i.created_at DESC`).Scan(&rows)
+	c.JSON(http.StatusOK, gin.H{"data": rows})
+}
+
+// PUT /api/admin/institutions/:iid/plan {plan: free|institution}
+func (h *Handler) AdminInstitutionPlan(c *gin.Context) {
+	iid, ok := paramID(c, "iid")
+	if !ok {
+		return
+	}
+	var in struct {
+		Plan string `json:"plan"`
+	}
+	_ = c.ShouldBindJSON(&in)
+	if in.Plan != InstFree && in.Plan != InstPaid {
+		fail(c, http.StatusUnprocessableEntity, "plan must be free or institution.")
+		return
+	}
+	res := h.s.db.Model(&Institution{}).Where("id = ?", iid).Update("plan", in.Plan)
+	if res.RowsAffected == 0 {
+		fail(c, http.StatusNotFound, "Institution not found.")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Plan saved."})
+}
+
+// DELETE /api/learn/institutions/:iid/members/:mid (owner; not the last owner)
 func (h *Handler) RemoveMember(c *gin.Context) {
-	inst, _, ok := h.instFor(c, true)
+	inst, _, ok := h.instFor(c, OrgOwner)
 	if !ok {
 		return
 	}
@@ -336,13 +500,9 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 		fail(c, http.StatusNotFound, "Member not found.")
 		return
 	}
-	if m.Role == OrgAdmin {
-		var admins int64
-		h.s.db.Model(&InstitutionMember{}).Where("institution_id = ? AND role = ?", inst.ID, OrgAdmin).Count(&admins)
-		if admins <= 1 {
-			fail(c, http.StatusConflict, "An institution needs at least one admin.")
-			return
-		}
+	if m.Role == OrgOwner && h.s.owners(inst.ID) <= 1 {
+		fail(c, http.StatusConflict, "An institution needs at least one owner.")
+		return
 	}
 	h.s.db.Delete(&m)
 	c.JSON(http.StatusOK, gin.H{"message": "Member removed."})
@@ -406,7 +566,7 @@ func (h *Handler) GetClass(c *gin.Context) {
 	h.s.linkMemberships(me)
 	var mine []instRow
 	h.s.db.Table("institutions i").Select("i.id, i.name").Joins("JOIN institution_members m ON m.institution_id = i.id").
-		Where("m.user_id = ?", me).Order("i.name").Scan(&mine)
+		Where("m.user_id = ? AND m.role IN ?", me, []string{OrgOwner, OrgLecturer}).Order("i.name").Scan(&mine)
 	if mine == nil {
 		mine = []instRow{}
 	}
@@ -434,8 +594,8 @@ func (h *Handler) UpdateClass(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"data": nil})
 			return
 		}
-		if r := h.s.orgRole(*in.InstitutionID, me); r == "" && !isAdmin(c) {
-			fail(c, http.StatusForbidden, "You can only add courses to institutions you belong to.")
+		if r := h.s.orgRole(*in.InstitutionID, me); r != OrgOwner && r != OrgLecturer && !isAdmin(c) {
+			fail(c, http.StatusForbidden, "You can only add courses to institutions where you are an owner or lecturer.")
 			return
 		}
 		if cl == nil || cl.InstitutionID != *in.InstitutionID {
@@ -454,6 +614,13 @@ func (h *Handler) UpdateClass(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": cl})
+}
+
+// inCourseInstitution: the user belongs to the institution the course is
+// in, so they may open and join it even when it is private.
+func (s *Service) inCourseInstitution(courseID, userID int) bool {
+	cl := s.courseClass(courseID)
+	return cl != nil && s.orgRole(cl.InstitutionID, userID) != ""
 }
 
 // rosterCheck: in a roster-only class, the learner's email must be listed.
@@ -712,9 +879,9 @@ func (h *Handler) SetConsent(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Thank you. Your teacher can now see your results."})
 }
 
-// POST /api/learn/institutions/:iid/courses/:cid/results-access {approved} (admin)
+// POST /api/learn/institutions/:iid/courses/:cid/results-access {approved} (owner)
 func (h *Handler) ApproveResults(c *gin.Context) {
-	inst, _, ok := h.instFor(c, true)
+	inst, _, ok := h.instFor(c, OrgOwner)
 	if !ok {
 		return
 	}
@@ -857,7 +1024,7 @@ func (s *Service) classResults(courseID int) ([]string, []learnerResult, map[str
 
 func round1(v float64) float64 { return float64(int(v*10+0.5)) / 10 }
 
-// resultsAllowed: an institution course whose results an admin approved.
+// resultsAllowed: an institution course whose results an owner approved.
 func (h *Handler) resultsAllowed(c *gin.Context) (*coursemodels.Course, bool) {
 	course, ok := h.ownedCourse(c)
 	if !ok {
@@ -869,7 +1036,7 @@ func (h *Handler) resultsAllowed(c *gin.Context) (*coursemodels.Course, bool) {
 		return nil, false
 	}
 	if cl.ResultsApprovedAt == nil {
-		fail(c, http.StatusForbidden, "An admin of your institution needs to approve results access for this course first.")
+		fail(c, http.StatusForbidden, "An owner of your institution needs to approve results access for this course first.")
 		return nil, false
 	}
 	return course, true

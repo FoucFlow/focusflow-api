@@ -140,6 +140,9 @@ func migrate(gdb *gorm.DB) error {
 			return fmt.Errorf("%T: %w", m, err)
 		}
 	}
+	if err := learn.MigrateInstitutions(gdb); err != nil {
+		return fmt.Errorf("institution roles: %w", err)
+	}
 	coursemodels.CategorySeeder(gdb)
 	return nil
 }

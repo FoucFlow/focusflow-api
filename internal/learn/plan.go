@@ -6,14 +6,15 @@ import (
 	"focusflow-api/internal/auth"
 )
 
-// Plans (FEATURES.md F4.2). Learning stays free. The Pro plan, and every
-// lecturer or admin of an institution, get higher creation limits and a
-// larger AI allowance. Payments come later; admins set plans until then.
+// Plans (FEATURES.md F4.2). Learning stays free. Personal accounts are free
+// or Pro; owners and lecturers of an institution on the paid Institution
+// plan get the same higher creation limits and larger AI allowance.
+// Payments come later; FocusFlow admins set plans until then.
 
 const (
 	PlanFree        = "free"
 	PlanPro         = "pro"
-	PlanInstitution = "institution" // Pro limits through an institution membership
+	PlanInstitution = "institution" // Pro limits as owner or lecturer of a paid institution
 )
 
 // ProLimits replace the free numbers for Pro users (0 = no limit).
@@ -29,7 +30,8 @@ type ProLimits struct {
 var DefaultPro = ProLimits{CoursesPerUser: 50, MaterialsPerCourse: 100, OrganiseRunsPerCourse: 30, QuestionRunsPerUnit: 30, NewCoursesPerDay: 0, AIFactor: 6}
 
 // planOf: pro while the user's plan is pro and not ended; institution when
-// they lecture or administer in one; else free.
+// they are an owner or lecturer of an institution on the paid plan; else
+// free. Students keep their own plan.
 func (s *Service) planOf(userID int) string {
 	var u struct {
 		Plan      string
@@ -40,7 +42,8 @@ func (s *Service) planOf(userID int) string {
 		return PlanPro
 	}
 	var n int64
-	s.db.Model(&InstitutionMember{}).Where("user_id = ?", userID).Count(&n)
+	s.db.Table("institution_members m").Joins("JOIN institutions i ON i.id = m.institution_id").
+		Where("m.user_id = ? AND m.role IN ? AND i.plan = ?", userID, []string{OrgOwner, OrgLecturer}, InstPaid).Count(&n)
 	if n > 0 {
 		return PlanInstitution
 	}

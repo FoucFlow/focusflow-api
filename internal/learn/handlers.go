@@ -514,7 +514,7 @@ func (h *Handler) GetCourse(c *gin.Context) {
 		return
 	}
 
-	if course.CourseStatus != "published" || (course.CourseVisibility != "public" && !h.s.isEnrolled(me, id)) {
+	if course.CourseStatus != "published" || (course.CourseVisibility != "public" && !h.s.isEnrolled(me, id) && !h.s.inCourseInstitution(id, me)) {
 		fail(c, http.StatusNotFound, "Course not found.")
 		return
 	}
@@ -566,7 +566,13 @@ func (h *Handler) AddUnit(c *gin.Context) {
 	var maxPos int
 	h.s.db.Model(&Unit{}).Where("course_id = ?", *course.CourseId).Select("COALESCE(MAX(position), 0)").Scan(&maxPos)
 	u := Unit{CourseID: *course.CourseId, Position: maxPos + 1, Title: clip(strings.TrimSpace(in.Title), 255), Body: in.Body, Source: "manual"}
-	if err := h.s.db.Create(&u).Error; err != nil {
+	err := h.s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&u).Error; err != nil {
+			return err
+		}
+		return renumber(tx, u.CourseID)
+	})
+	if err != nil {
 		fail(c, http.StatusInternalServerError, "Could not add the unit.")
 		return
 	}
@@ -698,7 +704,7 @@ func (h *Handler) ReorderUnits(c *gin.Context) {
 				return err
 			}
 		}
-		return nil
+		return renumber(tx, *course.CourseId)
 	})
 	if err != nil {
 		fail(c, http.StatusUnprocessableEntity, err.Error())
@@ -707,9 +713,13 @@ func (h *Handler) ReorderUnits(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": h.s.units(*course.CourseId)})
 }
 
+// renumber numbers the units 1..n and keeps the final exam after every unit:
+// it tests the whole course.
 func renumber(tx *gorm.DB, courseID int) error {
 	var us []Unit
-	tx.Where("course_id = ?", courseID).Order("position, id").Find(&us)
+	if err := tx.Where("course_id = ?", courseID).Order("final, position, id").Find(&us).Error; err != nil {
+		return err
+	}
 	for i, u := range us {
 		if u.Position != i+1 {
 			if err := tx.Model(&Unit{}).Where("id = ?", u.ID).Update("position", i+1).Error; err != nil {
@@ -811,11 +821,11 @@ func (h *Handler) Join(c *gin.Context) {
 		return
 	}
 	course, err := h.s.course(id)
-	if err != nil || course.CourseStatus != "published" || course.CourseVisibility != "public" {
+	me := c.GetInt(auth.CtxUserID)
+	if err != nil || course.CourseStatus != "published" || (course.CourseVisibility != "public" && !h.s.inCourseInstitution(id, me)) {
 		fail(c, http.StatusNotFound, "Course not found.")
 		return
 	}
-	me := c.GetInt(auth.CtxUserID)
 	if course.UserId == me {
 		fail(c, http.StatusUnprocessableEntity, "You created this course.")
 		return

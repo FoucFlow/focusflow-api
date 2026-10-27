@@ -47,7 +47,16 @@ admin.req("PUT", f"/api/admin/users/{fay_id}/plan", {"plan": "pro", "until": "20
 check("an ended Pro plan is free again", fay.req("GET", "/api/learn/me")[1]["data"]["plan"] == "free")
 s, b = gus.req("POST", "/api/learn/institutions", {"name": "Gus School"})
 t("Gus creates an institution", 201, s, b)
+GIID = b["data"]["id"]
 me = gus.req("GET", "/api/learn/me")[1]["data"]
-check("institution members get Pro limits", me["plan"] == "institution" and me["limits"]["courses_per_user"] == 50, me.get("plan"))
+check("a free institution gives no Pro limits", me["plan"] == "free", me.get("plan"))
+t("Gus cannot set his institution's plan", 403, gus.req("PUT", f"/api/admin/institutions/{GIID}/plan", {"plan": "institution"})[0])
+s, b = admin.req("GET", "/api/admin/institutions")
+check("admin lists institutions with owner", any(i["id"] == GIID and i["plan"] == "free" and i["owner"].startswith("gus") for i in b["data"]), b)
+t("admin puts it on the Institution plan", 200, admin.req("PUT", f"/api/admin/institutions/{GIID}/plan", {"plan": "institution"})[0])
+me = gus.req("GET", "/api/learn/me")[1]["data"]
+check("its owner gets Pro limits", me["plan"] == "institution" and me["limits"]["courses_per_user"] == 50, me.get("plan"))
+gus.req("POST", f"/api/learn/institutions/{GIID}/members", {"email": f"fay{run}@p.test", "role": "student"})
+check("a student keeps her own plan", fay.req("GET", "/api/learn/me")[1]["data"]["plan"] == "free")
 
 print(f"\npassed {ns['passed']}, failed {ns['failed']}")

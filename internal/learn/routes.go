@@ -23,6 +23,8 @@ func (h *Handler) Routes(r *gin.Engine) {
 
 	// Admin: AI usage against provider quotas
 	r.GET("/api/admin/ai/quota", auth.AuthMiddleware(), auth.RequireRole(auth.RoleAdmin), h.AIQuota)
+	r.GET("/api/admin/institutions", auth.AuthMiddleware(), auth.RequireRole(auth.RoleAdmin), h.AdminInstitutions)
+	r.PUT("/api/admin/institutions/:iid/plan", auth.AuthMiddleware(), auth.RequireRole(auth.RoleAdmin), h.AdminInstitutionPlan)
 
 	g.GET("/me", h.Me)
 	g.GET("/browse", h.Browse)
@@ -61,7 +63,9 @@ func (h *Handler) Routes(r *gin.Engine) {
 	g.GET("/institutions/:iid", h.GetInstitution)
 	g.PUT("/institutions/:iid", h.UpdateInstitution)
 	g.POST("/institutions/:iid/members", h.AddMember)
+	g.PUT("/institutions/:iid/members/:mid", h.UpdateMember)
 	g.DELETE("/institutions/:iid/members/:mid", h.RemoveMember)
+	g.DELETE("/institutions/:iid/membership", h.LeaveInstitution)
 	g.POST("/institutions/:iid/courses/:cid/results-access", h.ApproveResults)
 	g.GET("/courses/:id/class", h.GetClass)
 	g.PUT("/courses/:id/class", h.UpdateClass)

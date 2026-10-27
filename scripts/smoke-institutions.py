@@ -91,13 +91,13 @@ t("adds Lena as lecturer (email any case)", 201, s, b)
 check("  linked to her account", b["data"]["user_id"] is not None and b["data"]["email"] == mail[lec], b)
 s, b = adm.req("POST", f"/api/learn/institutions/{IID}/members", {"email": f"future{run}@uni.test", "role": "lecturer"})
 t("adds someone without an account yet", 201, s, b)
-t("Lena cannot add members", 403, lec.req("POST", f"/api/learn/institutions/{IID}/members", {"email": "x@y.zz", "role": "admin"})[0])
+t("Lena cannot add members", 403, lec.req("POST", f"/api/learn/institutions/{IID}/members", {"email": "x@y.zz", "role": "owner"})[0])
 t("an outsider cannot see the institution", 403, out.req("GET", f"/api/learn/institutions/{IID}")[0])
 s, b = lec.req("GET", "/api/learn/institutions")
 check("Lena sees it under her institutions", any(i["id"] == IID and i["role"] == "lecturer" for i in b["data"]), b)
 s, b = adm.req("GET", f"/api/learn/institutions/{IID}")
-admin_member = [m for m in b["data"]["members"] if m["role"] == "admin"][0]["id"]
-t("the last admin cannot be removed", 409, adm.req("DELETE", f"/api/learn/institutions/{IID}/members/{admin_member}")[0])
+admin_member = [m for m in b["data"]["members"] if m["role"] == "owner"][0]["id"]
+t("the last owner cannot be removed", 409, adm.req("DELETE", f"/api/learn/institutions/{IID}/members/{admin_member}")[0])
 
 # ── course with a unit test ────────────────────────────────────────────────
 s, b = lec.req("POST", "/api/course", form={"course_title": "Data Structures", "course_description": "x", "course_category_id": "1", "build_mode": "slides"})
@@ -153,7 +153,7 @@ check("class view: roster with joined state", sorted((r["email"].split("@")[0][:
 # ── consent and results (F4.4, F4.5) ───────────────────────────────────────
 s, b = stu1.req("GET", f"/api/learn/courses/{CID}")
 check("Sam is asked for consent", b["data"]["consent"] and not b["data"]["consent"]["given"] and "University of Kigali" in b["data"]["consent"]["institution"], b["data"].get("consent"))
-t("results need an admin's approval", 403, lec.req("GET", f"/api/learn/courses/{CID}/results")[0])
+t("results need an owner's approval", 403, lec.req("GET", f"/api/learn/courses/{CID}/results")[0])
 t("Lena cannot approve", 403, lec.req("POST", f"/api/learn/institutions/{IID}/courses/{CID}/results-access", {"approved": True})[0])
 t("Ada approves results access", 200, adm.req("POST", f"/api/learn/institutions/{IID}/courses/{CID}/results-access", {"approved": True})[0])
 
@@ -196,6 +196,37 @@ t("help to a learner without consent is refused", 403, lec.req("POST", f"/api/le
 s, _ = out.req("GET", f"/api/learn/courses/{CID}/results")
 check("an outsider cannot read results", s in (403, 404), s)
 t("Lena removes Sam from the course", 200, lec.req("DELETE", f"/api/learn/courses/{CID}/learners/{row.get('user_id', 0)}")[0])
+
+# ── members like a GitHub organisation: owners, lecturers, students ───────
+lec.req("PUT", f"/api/learn/courses/{CID}/class", {"roster_only": False})
+t("Kim cannot open the private course yet", 404, stu2.req("GET", f"/api/learn/courses/{CID}")[0])
+s, b = adm.req("POST", f"/api/learn/institutions/{IID}/members", {"email": mail[stu2], "role": "student"})
+t("Ada adds Kim as a student", 201, s, b)
+KIM = b["data"]["id"]
+t("unknown role refused", 422, adm.req("POST", f"/api/learn/institutions/{IID}/members", {"email": "z@y.zz", "role": "admin"})[0])
+s, b = stu2.req("GET", f"/api/learn/institutions/{IID}")
+t("Kim opens the institution", 200, s, b)
+check("  sees owners and lecturers, no emails, no students", b["data"]["role"] == "student" and all(m["role"] != "student" and m["email"] == "" for m in b["data"]["members"]), b["data"]["members"])
+check("  sees its courses", any(c["course_id"] == CID for c in b["data"]["courses"]), b["data"]["courses"])
+t("Kim opens the institution's private course", 200, stu2.req("GET", f"/api/learn/courses/{CID}")[0])
+t("Kim joins it", 200, stu2.req("POST", f"/api/learn/courses/{CID}/join")[0])
+t("a student cannot add members", 403, stu2.req("POST", f"/api/learn/institutions/{IID}/members", {"email": "z@y.zz", "role": "student"})[0])
+s, b = stu2.req("POST", "/api/course", form={"course_title": "Kim's", "course_description": "x", "course_category_id": "1"})
+KC = b.get("course_id")
+t("a student cannot put courses in the institution", 403, stu2.req("PUT", f"/api/learn/courses/{KC}/class", {"institution_id": IID})[0])
+t("a student cannot approve results", 403, stu2.req("POST", f"/api/learn/institutions/{IID}/courses/{CID}/results-access", {"approved": True})[0])
+t("the last owner cannot become a student", 409, adm.req("PUT", f"/api/learn/institutions/{IID}/members/{admin_member}", {"role": "student"})[0])
+t("the last owner cannot leave", 409, adm.req("DELETE", f"/api/learn/institutions/{IID}/membership")[0])
+lena = [m for m in adm.req("GET", f"/api/learn/institutions/{IID}")[1]["data"]["members"] if m["email"] == mail[lec]][0]["id"]
+t("Ada makes Lena an owner", 200, adm.req("PUT", f"/api/learn/institutions/{IID}/members/{lena}", {"role": "owner"})[0])
+t("Lena (owner) can now add members", 201, lec.req("POST", f"/api/learn/institutions/{IID}/members", {"email": f"tom{run}@uni.test", "role": "student"})[0])
+t("Ada leaves (another owner remains)", 200, adm.req("DELETE", f"/api/learn/institutions/{IID}/membership")[0])
+t("  and no longer sees it", 403, adm.req("GET", f"/api/learn/institutions/{IID}")[0])
+t("Kim leaves", 200, stu2.req("DELETE", f"/api/learn/institutions/{IID}/membership")[0])
+s, b = stu2.req("GET", "/api/learn/institutions")
+check("  it is gone from her list", all(i["id"] != IID for i in b["data"]), b["data"])
+t("leaving twice says not a member", 404, stu2.req("DELETE", f"/api/learn/institutions/{IID}/membership")[0])
+t("Kim's old member row is gone", 404, lec.req("PUT", f"/api/learn/institutions/{IID}/members/{KIM}", {"role": "lecturer"})[0])
 
 print(f"\npassed {passed}, failed {failed}")
 sys.exit(1 if failed else 0)

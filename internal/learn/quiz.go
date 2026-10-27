@@ -320,6 +320,12 @@ func (h *Handler) CreateQuiz(c *gin.Context) {
 		pos = after.Position + 1
 	}
 	if in.Final {
+		for _, u := range units {
+			if u.Final {
+				fail(c, http.StatusConflict, "This course already has a final exam.")
+				return
+			}
+		}
 		pos, covers = len(units)+1, []int{}
 	}
 	q := Unit{CourseID: courseID, Title: in.Title, Kind: "quiz", Covers: covers, Final: in.Final, Optional: true, Source: "manual"}
@@ -330,6 +336,9 @@ func (h *Handler) CreateQuiz(c *gin.Context) {
 		}
 		q.Position = pos
 		if err := tx.Create(&q).Error; err != nil {
+			return err
+		}
+		if err := renumber(tx, courseID); err != nil {
 			return err
 		}
 		st := defaultTestSettings(q.ID, courseID)
@@ -349,6 +358,7 @@ func (h *Handler) CreateQuiz(c *gin.Context) {
 		fail(c, http.StatusInternalServerError, "Could not add the quiz.")
 		return
 	}
+	h.s.db.First(&q, q.ID) // renumber may have moved it before the final exam
 	c.JSON(http.StatusCreated, gin.H{"data": q})
 }
 

@@ -132,6 +132,10 @@ QF = b["data"]["id"]
 s, b = sam.req("GET", f"/api/learn/courses/{CID}")
 order = [(u["title"], u["kind"]) for u in b["data"]["units"]]
 check("  order: Basics, Check-in, Deeper, Final exam", order == [("Basics", "lesson"), ("Check-in", "quiz"), ("Deeper", "lesson"), ("Final exam", "quiz")], order)
+t("only one final exam", 409, sam.req("POST", f"/api/learn/courses/{CID}/quizzes", {"final": True})[0])
+ids = [u["id"] for u in b["data"]["units"]]
+s, b = sam.req("PUT", f"/api/learn/courses/{CID}/units/order", {"unit_ids": [ids[3], ids[0], ids[1], ids[2]]})
+check("the final exam stays last when units move", s == 200 and b["data"][-1]["id"] == QF, [u["title"] for u in b["data"]] if s == 200 else b)
 s, b = sam.req("POST", f"/api/learn/units/{QP}/questions/generate")
 t("AI writes the practice quiz (from slides)", 202, s, b)
 ok = wait(lambda: sam.req("GET", f"/api/learn/units/{QP}/test")[1]["data"]["settings"]["pool_status"] == "ready")
