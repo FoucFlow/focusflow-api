@@ -107,8 +107,8 @@ func (s *Service) StartQuestions(u *Unit, c *coursemodels.Course) error {
 	if st.PoolStatus == StatusProcessing {
 		return errors.New("Questions are already being written for this unit.")
 	}
-	if lim := s.limits.QuestionRunsPerUnit; lim > 0 && st.PoolRuns >= lim {
-		return fmt.Errorf("The free plan allows %d AI question runs per unit. You can still add and edit questions by hand.", lim)
+	if l := s.limitsFor(c.UserId); l.QuestionRunsPerUnit > 0 && st.PoolRuns >= l.QuestionRunsPerUnit {
+		return fmt.Errorf("%s allows %d AI question runs per unit. You can still add and edit questions by hand.", planLabel(l), l.QuestionRunsPerUnit)
 	}
 	st.PoolStatus, st.PoolError = StatusProcessing, ""
 	st.PoolRuns++

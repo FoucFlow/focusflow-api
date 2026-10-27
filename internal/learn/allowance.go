@@ -70,13 +70,14 @@ func usedPercent(micro int64, capUSD float64) int {
 // UserAllowance is a creator's AI allowance now.
 func (s *Service) UserAllowance(userID int) Allowance {
 	a := Allowance{CanUseAI: true, Windows: []AllowanceWindow{}}
-	if s.limits.UserDailyUSD <= 0 && s.limits.UserMonthlyUSD <= 0 || s.isAdminUser(userID) {
+	limits := s.limitsFor(userID)
+	if limits.UserDailyUSD <= 0 && limits.UserMonthlyUSD <= 0 || s.isAdminUser(userID) {
 		a.Unlimited = true
 		return a
 	}
 	now := time.Now()
 	day, nextDay, month, nextMonth := allowanceWindows(now)
-	if lim := s.limits.UserDailyUSD; lim > 0 {
+	if lim := limits.UserDailyUSD; lim > 0 {
 		used := s.userSpendMicro(userID, day)
 		a.Windows = append(a.Windows, AllowanceWindow{Period: "day", UsedPercent: usedPercent(used, lim), ResetsAt: nextDay})
 		if float64(used) >= lim*1e6 {
@@ -85,7 +86,7 @@ func (s *Service) UserAllowance(userID int) Allowance {
 				". Your course is saved; carry on then."
 		}
 	}
-	if lim := s.limits.UserMonthlyUSD; lim > 0 {
+	if lim := limits.UserMonthlyUSD; lim > 0 {
 		used := s.userSpendMicro(userID, month)
 		a.Windows = append(a.Windows, AllowanceWindow{Period: "month", UsedPercent: usedPercent(used, lim), ResetsAt: nextMonth})
 		if float64(used) >= lim*1e6 {

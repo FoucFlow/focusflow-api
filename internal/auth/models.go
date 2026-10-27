@@ -13,11 +13,15 @@ var validRoles = map[string]bool{RoleStudent: true, RoleTeacher: true, RoleAdmin
 // User replaces the Laravel users table. JSON matches what Laravel returned,
 // so the frontend keeps working; password and google_id are never serialised.
 type User struct {
-	ID              int        `json:"id" gorm:"primaryKey"`
-	Name            string     `json:"name" gorm:"size:255;not null"`
-	Username        *string    `json:"username" gorm:"size:255;uniqueIndex"`
-	Email           string     `json:"email" gorm:"size:255;not null;uniqueIndex"`
-	Role            string     `json:"role" gorm:"size:16;not null;default:student;index"`
+	ID       int     `json:"id" gorm:"primaryKey"`
+	Name     string  `json:"name" gorm:"size:255;not null"`
+	Username *string `json:"username" gorm:"size:255;uniqueIndex"`
+	Email    string  `json:"email" gorm:"size:255;not null;uniqueIndex"`
+	Role     string  `json:"role" gorm:"size:16;not null;default:student;index"`
+	// Plan (F4.2): free or pro. Pro raises course, material and AI limits;
+	// PlanUntil ends it (nil = no end). Set by admins until payments exist.
+	Plan            string     `json:"plan" gorm:"size:16;not null;default:free"`
+	PlanUntil       *time.Time `json:"plan_until"`
 	EmailVerifiedAt *time.Time `json:"email_verified_at"`
 	Bio             *string    `json:"bio" gorm:"type:text"`
 	Avatar          *string    `json:"avatar" gorm:"size:1024"`

@@ -92,6 +92,38 @@ func (h *Handler) AdminUpdateRole(c *gin.Context) {
 	ok(c, http.StatusOK, u, "User role updated successfully.")
 }
 
+// PUT /api/admin/users/:id/plan {plan: free|pro, until?: RFC 3339 or ""}
+// Plans are set by hand until payments exist (FEATURES.md F4.2).
+func (h *Handler) AdminUpdatePlan(c *gin.Context) {
+	var in struct {
+		Plan  string  `json:"plan"`
+		Until *string `json:"until"`
+	}
+	_ = c.ShouldBindJSON(&in)
+	if in.Plan != "free" && in.Plan != "pro" {
+		validationError(c, "plan", "The plan must be free or pro.")
+		return
+	}
+	id, _ := strconv.Atoi(c.Param("id"))
+	u, err := h.svc.UserByID(id)
+	if err != nil {
+		fail(c, http.StatusNotFound, "User not found")
+		return
+	}
+	var until *time.Time
+	if in.Until != nil && *in.Until != "" {
+		t, err := time.Parse(time.RFC3339, *in.Until)
+		if err != nil {
+			validationError(c, "until", "Use a date like 2027-01-31T00:00:00Z.")
+			return
+		}
+		until = &t
+	}
+	h.svc.db.Model(u).Updates(map[string]any{"plan": in.Plan, "plan_until": until})
+	u, _ = h.svc.UserByID(u.ID)
+	ok(c, http.StatusOK, u, "Plan updated.")
+}
+
 func (h *Handler) countUsers(where string, args ...any) int64 {
 	var n int64
 	q := h.svc.db.Model(&User{})

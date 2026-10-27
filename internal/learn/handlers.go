@@ -102,8 +102,8 @@ func (h *Handler) AddMaterial(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if h.s.limits.MaterialsPerCourse > 0 && h.s.materialCount(*course.CourseId) >= h.s.limits.MaterialsPerCourse {
-		fail(c, http.StatusUnprocessableEntity, "The free plan allows "+strconv.Itoa(h.s.limits.MaterialsPerCourse)+" materials per course.")
+	if lim := h.s.limitsFor(course.UserId); lim.MaterialsPerCourse > 0 && h.s.materialCount(*course.CourseId) >= lim.MaterialsPerCourse {
+		fail(c, http.StatusUnprocessableEntity, planLabel(lim)+" allows "+strconv.Itoa(lim.MaterialsPerCourse)+" materials per course"+upgradeHint(lim)+".")
 		return
 	}
 	me := c.GetInt(auth.CtxUserID)
@@ -159,8 +159,8 @@ func (h *Handler) AddMaterial(c *gin.Context) {
 
 // uploadFile stores a multipart PDF or .pptx ("file" + optional "title").
 func (h *Handler) uploadFile(c *gin.Context, course *coursemodels.Course, me int) {
-	if h.s.limits.MaterialsPerCourse > 0 && h.s.materialCount(*course.CourseId) >= h.s.limits.MaterialsPerCourse {
-		fail(c, http.StatusUnprocessableEntity, "The free plan allows "+strconv.Itoa(h.s.limits.MaterialsPerCourse)+" materials per course.")
+	if lim := h.s.limitsFor(course.UserId); lim.MaterialsPerCourse > 0 && h.s.materialCount(*course.CourseId) >= lim.MaterialsPerCourse {
+		fail(c, http.StatusUnprocessableEntity, planLabel(lim)+" allows "+strconv.Itoa(lim.MaterialsPerCourse)+" materials per course"+upgradeHint(lim)+".")
 		return
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.s.limits.MaxFileBytes+(1<<20))
@@ -508,7 +508,7 @@ func (h *Handler) GetCourse(c *gin.Context) {
 		h.s.db.Model(&coursemodels.Enrollment{}).Where("course_id = ?", id).Count(&learners)
 		c.JSON(http.StatusOK, gin.H{"data": gin.H{
 			"role": "creator", "course": course, "materials": mats, "units": views,
-			"learners": learners, "limits": h.s.limits, "ai_allowance": h.s.UserAllowance(course.UserId),
+			"learners": learners, "limits": h.s.limitsFor(course.UserId), "ai_allowance": h.s.UserAllowance(course.UserId),
 			"progress": h.s.courseProgress(course),
 		}})
 		return
@@ -931,8 +931,9 @@ func (h *Handler) Me(c *gin.Context) {
 	}
 	canCreate, reason := h.s.CanCreateCourse(me, isAdmin(c))
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
-		"created": created, "joined": joined, "limits": h.s.limits,
+		"created": created, "joined": joined,
 		"can_create_course": canCreate, "create_limit_reason": reason, "ai_allowance": h.s.UserAllowance(me),
+		"plan": h.s.planOf(me), "limits": h.s.limitsFor(me),
 		"progress": progress, "covers": h.s.covers(ids),
 	}})
 }

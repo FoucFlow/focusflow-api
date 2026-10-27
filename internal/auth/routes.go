@@ -28,6 +28,7 @@ func (h *Handler) Routes(r *gin.Engine) {
 	admin.GET("/users", h.AdminListUsers)
 	admin.GET("/users/:id", h.AdminShowUser)
 	admin.PUT("/users/:id/role", h.AdminUpdateRole)
+	admin.PUT("/users/:id/plan", h.AdminUpdatePlan)
 	admin.GET("/stats", h.AdminStats)
 	admin.GET("/analytics/overview", h.AnalyticsOverview)
 	admin.GET("/analytics/users/growth", h.AnalyticsUserGrowth)

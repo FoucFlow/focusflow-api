@@ -41,6 +41,10 @@ type Limits struct {
 	// The first part is short, so units can be made from it quickly
 	FirstPartPages    int `json:"first_part_pages"`
 	FirstVideoSeconds int `json:"first_video_seconds"`
+	// Pro is what the Pro plan and institution members get (plan.go)
+	Pro ProLimits `json:"-"`
+	// Plan is filled in by limitsFor: the plan these limits belong to
+	Plan string `json:"plan,omitempty"`
 }
 
 func (l Limits) partPages(first bool) int {
@@ -300,17 +304,18 @@ func (s *Service) course(id int) (*coursemodels.Course, error) {
 	return &c, nil
 }
 
-// CanCreateCourse enforces the free-tier course count (admins are exempt).
+// CanCreateCourse enforces the plan's course count (admins are exempt).
 func (s *Service) CanCreateCourse(userID int, isAdmin bool) (bool, string) {
-	if isAdmin || s.limits.CoursesPerUser <= 0 {
+	lim := s.limitsFor(userID)
+	if isAdmin || lim.CoursesPerUser <= 0 {
 		return true, ""
 	}
 	var n int64
 	s.db.Model(&coursemodels.Course{}).Where("user_id = ?", userID).Count(&n)
-	if int(n) >= s.limits.CoursesPerUser {
-		return false, fmt.Sprintf("The free plan includes %d courses. Delete one to create another.", s.limits.CoursesPerUser)
+	if int(n) >= lim.CoursesPerUser {
+		return false, fmt.Sprintf("%s includes %d courses. Delete one to create another%s.", planLabel(lim), lim.CoursesPerUser, upgradeHint(lim))
 	}
-	if lim := s.limits.NewCoursesPerDay; lim > 0 {
+	if lim := lim.NewCoursesPerDay; lim > 0 {
 		day, next, _, _ := allowanceWindows(time.Now())
 		var today int64
 		s.db.Model(&coursemodels.Course{}).Where("user_id = ? AND created_at >= ?", userID, day).Count(&today)
@@ -785,8 +790,8 @@ func (s *Service) StartOrganise(c *coursemodels.Course) error {
 	if err := s.checkAI(c.UserId); err != nil {
 		return errors.New(limitMessage(err))
 	}
-	if s.limits.OrganiseRunsPerCourse > 0 && c.OrganiseRuns >= s.limits.OrganiseRunsPerCourse {
-		return fmt.Errorf("The free plan allows %d AI organise runs per course. You can still edit the units by hand.", s.limits.OrganiseRunsPerCourse)
+	if lim := s.limitsFor(c.UserId); lim.OrganiseRunsPerCourse > 0 && c.OrganiseRuns >= lim.OrganiseRunsPerCourse {
+		return fmt.Errorf("%s allows %d AI organise runs per course. You can still edit the units by hand.", planLabel(lim), lim.OrganiseRunsPerCourse)
 	}
 	var processing, ready int64
 	s.db.Model(&Material{}).Where("course_id = ? AND status = ?", *c.CourseId, StatusProcessing).Count(&processing)
