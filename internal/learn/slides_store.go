@@ -25,6 +25,7 @@ type SlidePage struct {
 	Hidden     bool         `json:"hidden"`
 	HasDiagram bool         `json:"has_diagram"`
 	MediaKeys  []string     `json:"-" gorm:"type:jsonb;serializer:json"` // pictures in the media bucket
+	Edited     bool         `json:"edited"` // the teacher changed it (F3.6)
 	CreatedAt  time.Time    `json:"created_at"`
 	UpdatedAt  time.Time    `json:"updated_at"`
 }

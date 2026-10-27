@@ -49,8 +49,14 @@ IMG=$(py "d['data']['pages'][2]['blocks'][0]['src']")
 code=$(curl -s -o "$D/img" -w "%{http_code}" "$IMG")
 if [ "$code" = 200 ] && [ "$(head -c 4 "$D/img" | tail -c 3)" = PNG ]; then pass=$((pass+1)); echo "ok   picture is served"; else failn=$((failn+1)); echo "FAIL picture is served: $code $IMG"; fi
 
+PID=$(py "d['data']['pages'][1]['id']")
+t "edit a slide (F3.6)" 200 "${A[@]}" "${J[@]}" -X PUT -d '{"title":"Base case","blocks":[{"type":"text","lines":[{"level":0,"bullet":true,"runs":[{"text":"Edited","bold":true},{"text":" line","link":"javascript:alert(1)"}]}]}],"diagram":true}' $B/api/learn/slide-pages/$PID
+check "  saved, unsafe link dropped, diagram card added" "d['data']['edited'] and d['data']['title']=='Base case' and d['data']['blocks'][0]['lines'][0]['runs'][1].get('link') is None and d['data']['has_diagram']"
+t "  a picture from elsewhere is refused" 422 "${A[@]}" "${J[@]}" -X PUT -d '{"blocks":[{"type":"image","src":"https://evil.example/x.png"}]}' $B/api/learn/slide-pages/$PID
+t "  kim cannot edit sam's slide" 403 "${Bo[@]}" "${J[@]}" -X PUT -d '{"title":"x"}' $B/api/learn/slide-pages/$PID
+t "  hide it" 200 "${A[@]}" "${J[@]}" -X PUT -d '{"hidden":true}' $B/api/learn/slide-pages/$PID
 t "asking again gives the same pages" 200 "${A[@]}" $B/api/learn/materials/$MID/pages
-check "  still 8" "len(d['data']['pages'])==8"
+check "  still 8, the edit kept" "len(d['data']['pages'])==8 and d['data']['pages'][1]['title']=='Base case' and d['data']['pages'][1]['hidden']"
 t "kim cannot read sam's pages" 403 "${Bo[@]}" $B/api/learn/materials/$MID/pages
 t "a PDF has no slide pages" 422 "${A[@]}" $B/api/learn/materials/$PDF/pages
 t "unknown material" 404 "${A[@]}" $B/api/learn/materials/99999999/pages
