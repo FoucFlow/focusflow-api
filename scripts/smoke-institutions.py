@@ -184,6 +184,7 @@ check("  weakest concept found, hardest first in the map", "Recursion" in row.ge
 s, b = lec.req("GET", f"/api/learn/courses/{CID}/results/{row.get('user_id', 0)}/help")
 t("help draft", 200, s, b)
 check("  names the weak concept and links a unit", "Recursion" in b["data"]["body"] and "/unit/" in b["data"]["body"], b["data"]["body"])
+check("  links lessons, never a quiz", f"/unit/{U1}" in b["data"]["body"], b["data"]["body"])
 s, b = lec.req("POST", f"/api/learn/courses/{CID}/results/{row.get('user_id', 0)}/help", {"subject": b["data"]["subject"], "body": b["data"]["body"] + "\nSee you Tuesday.", "concepts": b["data"]["concepts"]})
 t("Lena sends the reviewed help", 200, s, b)
 s, b = lec.req("GET", f"/api/learn/courses/{CID}/results")

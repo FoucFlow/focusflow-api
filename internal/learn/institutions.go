@@ -905,10 +905,14 @@ func (s *Service) helpLinks(courseID int, concepts []string) map[string][]gin.H 
 			}
 			seen[id] = true
 			target := u
-			if u.Kind == "quiz" { // point to the lessons it covers
-				if cov := s.coveredUnits(&u); len(cov) > 0 {
-					s.db.First(&target, cov[0])
+			if u.Kind == "quiz" { // point to the lessons it covers, not the quiz
+				var lesson Unit
+				cov := s.coveredUnits(&u)
+				if len(cov) == 0 || s.db.First(&lesson, cov[len(cov)-1]).Error != nil || seen[lesson.ID] {
+					continue
 				}
+				seen[lesson.ID] = true
+				target = lesson
 			}
 			out[k] = append(out[k], gin.H{"unit_id": target.ID, "title": target.Title,
 				"url": fmt.Sprintf("%s/learn/%d/unit/%d", s.frontendURL, courseID, target.ID)})
