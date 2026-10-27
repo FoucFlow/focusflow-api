@@ -87,6 +87,10 @@ check "  ready at once" "d['data']['status']=='ready'"
 t "AI organise is refused" 422 "${A[@]}" -X POST $B/api/learn/courses/$SC/organise
 check "  says to cut the slides" "'slides as written' in d['message']"
 t "publish needs units" 422 "${A[@]}" "${J[@]}" -d '{"visibility":"public","confirm_rights":true}' $B/api/learn/courses/$SC/publish
+t "AI suggests units (F3.5)" 200 "${A[@]}" -X POST $B/api/learn/materials/$SM/suggest-units
+check "  cuts start at slide 1, in order, with titles" "d['data'][0]['first_slide']==1 and all(a['first_slide']<b['first_slide'] for a,b in zip(d['data'],d['data'][1:])) and all(c['title'] for c in d['data'])"
+t "  not for AI-built courses" 409 "${A[@]}" -X POST $B/api/learn/materials/$PDF/suggest-units
+t "  not for someone else's deck" 403 "${Bo[@]}" -X POST $B/api/learn/materials/$SM/suggest-units
 t "a range past the last slide" 422 "${A[@]}" "${J[@]}" -X PUT -d "{\"units\":[{\"title\":\"x\",\"material_id\":$SM,\"first_page\":1,\"last_page\":9}]}" $B/api/learn/courses/$SC/slide-units
 t "first after last" 422 "${A[@]}" "${J[@]}" -X PUT -d "{\"units\":[{\"title\":\"x\",\"material_id\":$SM,\"first_page\":3,\"last_page\":2}]}" $B/api/learn/courses/$SC/slide-units
 t "a material of another course" 422 "${A[@]}" "${J[@]}" -X PUT -d "{\"units\":[{\"title\":\"x\",\"material_id\":$PDF,\"first_page\":1,\"last_page\":1}]}" $B/api/learn/courses/$SC/slide-units

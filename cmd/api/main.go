@@ -317,6 +317,7 @@ func chooseAI(cfg *config.Config) (learn.AI, string) {
 				learn.Enricher
 				learn.Examiner
 				learn.Explainer
+				learn.Structurer
 			}); ok {
 				slog.Info("Gemini is the backup AI when Claude is out of credit")
 				return learn.FallbackAI{Primary: full, Backup: g}, "claude"

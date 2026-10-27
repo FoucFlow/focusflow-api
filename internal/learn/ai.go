@@ -20,6 +20,7 @@ type fullAI interface {
 	Enricher
 	Examiner
 	Explainer
+	Structurer
 }
 
 // FallbackAI uses Primary, and Backup for any call Primary refuses because

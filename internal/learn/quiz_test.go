@@ -147,3 +147,16 @@ func TestWindowAndAnswersVisible(t *testing.T) {
 		t.Error("answer visibility")
 	}
 }
+
+func TestCleanCuts(t *testing.T) {
+	cuts, err := cleanCuts([]SuggestedCut{{5, "Deeper"}, {3, ""}, {5, "dup"}, {99, "out"}, {0, "zero"}}, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cuts) != 3 || cuts[0].FirstSlide != 1 || cuts[1].FirstSlide != 3 || cuts[2].Title != "Deeper" {
+		t.Errorf("cuts = %+v", cuts)
+	}
+	if _, err := cleanCuts(nil, 8); err == nil {
+		t.Error("no cuts is an error")
+	}
+}

@@ -46,6 +46,7 @@ func (h *Handler) Routes(r *gin.Engine) {
 	g.POST("/materials/:mid/retry", h.RetryMaterial)
 	g.GET("/materials/:mid/pages", h.SlidePages)
 	g.PUT("/slide-pages/:pid", h.UpdateSlidePage)
+	g.POST("/materials/:mid/suggest-units", h.SuggestUnits)
 	g.PUT("/courses/:id/build-mode", h.SetBuildMode)
 	g.PUT("/courses/:id/slide-units", h.SaveSlideUnits)
 	g.GET("/units/:uid/pages", h.UnitPages)
