@@ -42,10 +42,11 @@ func (s *Service) markReadyWithoutAI(m *Material) {
 
 // SlideRange is the part of a slides material a unit reads.
 type SlideRange struct {
-	MaterialID int `json:"material_id"`
-	FirstPage  int `json:"first_page"` // 0 = from the first slide
-	LastPage   int `json:"last_page"`  // 0 = to the last slide
-	Count      int `json:"count"`      // slides learners see (hidden ones left out)
+	MaterialID int    `json:"material_id"`
+	FirstPage  int    `json:"first_page"` // 0 = from the first slide
+	LastPage   int    `json:"last_page"`  // 0 = to the last slide
+	Count      int    `json:"count"`      // slides learners see (hidden ones left out)
+	Kind       string `json:"kind"`       // slides | pdf
 }
 
 // unitRanges returns, per unit, the slide ranges it reads.
@@ -54,11 +55,19 @@ func (s *Service) unitRanges(unitIDs []int) map[int][]SlideRange {
 	if len(unitIDs) == 0 {
 		return out
 	}
-	var links []UnitMaterial
-	s.db.Table("unit_materials").Joins("JOIN course_materials_v2 m ON m.id = unit_materials.material_id").
-		Where("unit_materials.unit_id IN ? AND m.kind = ?", unitIDs, KindSlides).
+	var links []struct {
+		UnitMaterial
+		Kind string
+	}
+	s.db.Table("unit_materials").Select("unit_materials.*, m.kind").Joins("JOIN course_materials_v2 m ON m.id = unit_materials.material_id").
+		Where("unit_materials.unit_id IN ? AND m.kind IN ?", unitIDs, []string{KindSlides, KindPDF}).
 		Order("unit_materials.unit_id, unit_materials.position").Find(&links)
 	for _, l := range links {
+		if l.Kind == KindPDF { // PDF pages (F3.2): every page in the range is shown
+			out[l.UnitID] = append(out[l.UnitID], SlideRange{MaterialID: l.MaterialID, FirstPage: l.FirstPage, LastPage: l.LastPage,
+				Count: l.LastPage - l.FirstPage + 1, Kind: KindPDF})
+			continue
+		}
 		q := s.db.Model(&SlidePage{}).Where("material_id = ? AND NOT hidden", l.MaterialID)
 		if l.FirstPage > 0 {
 			q = q.Where("number >= ?", l.FirstPage)
@@ -68,7 +77,7 @@ func (s *Service) unitRanges(unitIDs []int) map[int][]SlideRange {
 		}
 		var n int64
 		q.Count(&n)
-		out[l.UnitID] = append(out[l.UnitID], SlideRange{MaterialID: l.MaterialID, FirstPage: l.FirstPage, LastPage: l.LastPage, Count: int(n)})
+		out[l.UnitID] = append(out[l.UnitID], SlideRange{MaterialID: l.MaterialID, FirstPage: l.FirstPage, LastPage: l.LastPage, Count: int(n), Kind: KindSlides})
 	}
 	return out
 }
@@ -154,7 +163,7 @@ func (h *Handler) SaveSlideUnits(c *gin.Context) {
 
 	// Materials and their slide counts
 	var mats []Material
-	h.s.db.Where("course_id = ? AND kind = ?", courseID, KindSlides).Find(&mats)
+	h.s.db.Where("course_id = ? AND kind IN ?", courseID, []string{KindSlides, KindPDF}).Find(&mats)
 	matByID := map[int]*Material{}
 	for i := range mats {
 		matByID[mats[i].ID] = &mats[i]
@@ -163,10 +172,17 @@ func (h *Handler) SaveSlideUnits(c *gin.Context) {
 	for _, u := range in.Units {
 		m := matByID[u.MaterialID]
 		if m == nil {
-			fail(c, http.StatusUnprocessableEntity, "Each unit must use a PowerPoint file of this course.")
+			fail(c, http.StatusUnprocessableEntity, "Each unit must use a PowerPoint or PDF file of this course.")
 			return
 		}
-		if _, done := counts[m.ID]; !done {
+		if _, done := counts[m.ID]; !done && m.Kind == KindPDF {
+			n, err := h.s.pdfPages(c.Request.Context(), m)
+			if err != nil {
+				fail(c, http.StatusUnprocessableEntity, "Could not read the pages of “"+m.Title+"”.")
+				return
+			}
+			counts[m.ID] = n
+		} else if !done {
 			pages, err := h.s.SlidePages(c.Request.Context(), m)
 			if err != nil {
 				fail(c, http.StatusUnprocessableEntity, "Could not read the slides of “"+m.Title+"”.")
@@ -305,7 +321,8 @@ func deleteUnitIDs(tx *gorm.DB, ids []int) error {
 type unitDeck struct {
 	MaterialID int         `json:"material_id"`
 	Title      string      `json:"title"`
-	URL        string      `json:"url"` // the original file (diagram card)
+	Kind       string      `json:"kind"` // slides | pdf
+	URL        string      `json:"url"`  // the original file (diagram card)
 	FirstPage  int         `json:"first_page"`
 	LastPage   int         `json:"last_page"`
 	Pages      []SlidePage `json:"pages"`
@@ -346,12 +363,17 @@ func (h *Handler) UnitPages(c *gin.Context) {
 		if err := h.s.db.First(&m, r.MaterialID).Error; err != nil {
 			continue
 		}
+		if m.Kind == KindPDF {
+			// Drawn in the browser from the file (GET /materials/:mid/file)
+			decks = append(decks, unitDeck{MaterialID: m.ID, Title: m.Title, Kind: KindPDF, FirstPage: r.FirstPage, LastPage: r.LastPage, Pages: []SlidePage{}})
+			continue
+		}
 		pages, err := h.s.SlidePages(c.Request.Context(), &m)
 		if err != nil {
 			slog.Warn("unit pages", "unit", u.ID, "material", m.ID, "error", err)
 			continue
 		}
-		d := unitDeck{MaterialID: m.ID, Title: m.Title, URL: m.URL, FirstPage: r.FirstPage, LastPage: r.LastPage, Pages: []SlidePage{}}
+		d := unitDeck{MaterialID: m.ID, Title: m.Title, Kind: KindSlides, URL: m.URL, FirstPage: r.FirstPage, LastPage: r.LastPage, Pages: []SlidePage{}}
 		for _, p := range pages {
 			if p.Hidden || (r.FirstPage > 0 && p.Number < r.FirstPage) || (r.LastPage > 0 && p.Number > r.LastPage) {
 				continue

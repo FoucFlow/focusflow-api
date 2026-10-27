@@ -393,6 +393,12 @@ func (s *Service) AddFile(ctx context.Context, c *coursemodels.Course, ownerID i
 	}
 
 	if slidesMode(c) {
+		if kind == KindPDF {
+			if n := pdfPageCount(data); n > 0 {
+				s.db.Model(m).Update("total_pages", n)
+				m.TotalPages = n
+			}
+		}
 		s.markReadyWithoutAI(m) // slides as written: no AI reading
 		return m, nil
 	}

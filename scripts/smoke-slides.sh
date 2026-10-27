@@ -117,5 +117,18 @@ t "re-cut keeping unit 1 (progress stays)" 200 "${A[@]}" "${J[@]}" -X PUT -d "{\
 t "unit 2 still open for kim" 200 "${Bo[@]}" $B/api/learn/units/$U2/pages
 check "  now from slide 3" "d['data'][0]['pages'][0]['number']==3"
 
+# ── PDF pages in a slides course (F3.2)
+t "unpublish to change units" 200 "${A[@]}" -X POST $B/api/learn/courses/$SC/unpublish
+t "upload a 5-page PDF" 201 "${A[@]}" -F "file=@internal/learn/testdata/five-pages.pdf" -F title="Notes" $B/api/learn/courses/$SC/materials
+SP=$(py "d['data']['id']")
+check "  ready at once with its page count" "d['data']['status']=='ready' and d['data']['total_pages']==5"
+t "page count" 200 "${A[@]}" $B/api/learn/materials/$SP/page-count
+t "a unit from PDF pages 2-4" 200 "${A[@]}" "${J[@]}" -X PUT -d "{\"units\":[{\"id\":$U1,\"title\":\"Basics\",\"material_id\":$SM,\"first_page\":1,\"last_page\":3},{\"title\":\"Notes\",\"material_id\":$SP,\"first_page\":2,\"last_page\":4}]}" $B/api/learn/courses/$SC/slide-units
+check "  pdf range, 3 pages" "d['data'][1]['slides'][0]=={'material_id':$SP,'first_page':2,'last_page':4,'count':3,'kind':'pdf'}"
+t "  past the last page refused" 422 "${A[@]}" "${J[@]}" -X PUT -d "{\"units\":[{\"title\":\"x\",\"material_id\":$SP,\"first_page\":1,\"last_page\":6}]}" $B/api/learn/courses/$SC/slide-units
+t "publish again" 200 "${A[@]}" "${J[@]}" -d '{"visibility":"public","confirm_rights":true}' $B/api/learn/courses/$SC/publish
+t "kim (enrolled) can read the PDF" 200 "${Bo[@]}" -o /dev/null $B/api/learn/materials/$SP/file
+t "lee (not enrolled) cannot" 404 "${C[@]}" $B/api/learn/materials/$SP/file
+
 echo; echo "passed $pass, failed $failn"
 [ "$failn" = 0 ]
