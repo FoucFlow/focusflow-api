@@ -79,6 +79,8 @@ type Config struct {
 
 	AdminEmail    string // seeded admin account (created only if missing)
 	AdminPassword string
+
+	ContactEmail string // where home-page contact messages go (empty = AdminEmail)
 }
 
 func Load() (*Config, error) {
@@ -147,6 +149,7 @@ func Load() (*Config, error) {
 
 		AdminEmail:    os.Getenv("ADMIN_EMAIL"),
 		AdminPassword: os.Getenv("ADMIN_PASSWORD"),
+		ContactEmail:  os.Getenv("CONTACT_EMAIL"),
 	}
 	c.SecureCookies = c.Env == "production"
 

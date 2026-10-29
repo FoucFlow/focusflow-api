@@ -10,6 +10,7 @@ func (h *Handler) Routes(r *gin.Engine) {
 	r.POST("/logout", h.Logout)
 	r.POST("/forgot-password", h.ForgotPassword)
 	r.POST("/reset-password", h.ResetPassword)
+	r.POST("/contact", h.Contact)
 	r.GET("/verify-email/:id/:hash", h.VerifyEmail)
 	r.POST("/email/verification-notification", AuthMiddleware(), h.ResendVerification)
 

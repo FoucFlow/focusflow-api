@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -106,5 +107,30 @@ func TestLoginLimiter(t *testing.T) {
 	l.clear("k")
 	if l.retryAfter("k") > 0 {
 		t.Fatal("clear must reset")
+	}
+}
+
+func TestContactLimit(t *testing.T) {
+	l := &contactLimit{}
+	now := time.Now()
+	for i := 0; i < contactPerSender; i++ {
+		if !l.allow("a@test.io", now) {
+			t.Fatalf("send %d should be allowed", i+1)
+		}
+	}
+	if l.allow("a@test.io", now) {
+		t.Fatal("sender over the limit should be refused")
+	}
+	if !l.allow("b@test.io", now) {
+		t.Fatal("another sender should still be allowed")
+	}
+	if !l.allow("a@test.io", now.Add(contactWindow+time.Second)) {
+		t.Fatal("sender should be allowed again after the window")
+	}
+	for i := 0; len(l.sent) < contactPerSite; i++ {
+		l.allow(fmt.Sprintf("s%d@test.io", i), now.Add(contactWindow+time.Second))
+	}
+	if l.allow("new@test.io", now.Add(contactWindow+time.Second)) {
+		t.Fatal("site over the limit should be refused")
 	}
 }
