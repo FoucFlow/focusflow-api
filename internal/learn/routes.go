@@ -29,6 +29,7 @@ func (h *Handler) Routes(r *gin.Engine) {
 	g.GET("/me", h.Me)
 	g.GET("/browse", h.Browse)
 	g.GET("/categories", h.Categories)
+	g.GET("/quizzes", h.MyQuizzes)
 
 	g.GET("/courses/:id", h.GetCourse)
 	g.POST("/courses/:id/join", h.Join)

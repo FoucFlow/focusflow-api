@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -784,7 +785,9 @@ func (h *Handler) Unpublish(c *gin.Context) {
 
 // ── learners ─────────────────────────────────────────────────────────────
 
-// GET /api/learn/browse?q=: published public courses
+// GET /api/learn/browse?q=&category=&sort=: published public courses.
+// The learner's own courses are left out: Discover is for other people's work,
+// and the ones you created live under My learning.
 func (h *Handler) Browse(c *gin.Context) {
 	type row struct {
 		coursemodels.Course
@@ -792,11 +795,19 @@ func (h *Handler) Browse(c *gin.Context) {
 		Learners int    `json:"learners"`
 		Cover    string `json:"cover,omitempty"`
 	}
+	me := c.GetInt(auth.CtxUserID)
 	var courses []coursemodels.Course
-	q := h.s.db.Preload("Category").Where("course_status = ? AND course_visibility = ?", "published", "public")
+	q := h.s.db.Preload("Category").
+		Where("course_status = ? AND course_visibility = ?", "published", "public").
+		Where("user_id <> ?", me)
 	if s := strings.TrimSpace(c.Query("q")); s != "" {
 		like := "%" + strings.ToLower(s) + "%"
 		q = q.Where("LOWER(course_title) LIKE ? OR LOWER(course_description) LIKE ?", like, like)
+	}
+	if raw := strings.TrimSpace(c.Query("category")); raw != "" {
+		if id, err := strconv.Atoi(raw); err == nil && id > 0 {
+			q = q.Where("course_category_id = ?", id)
+		}
 	}
 	q.Order("published_at DESC").Limit(100).Find(&courses)
 	ids := make([]int, 0, len(courses))
@@ -811,7 +822,149 @@ func (h *Handler) Browse(c *gin.Context) {
 		h.s.db.Model(&coursemodels.Enrollment{}).Where("course_id = ?", *course.CourseId).Count(&learners)
 		out = append(out, row{Course: course, Units: int(units), Learners: int(learners), Cover: covers[*course.CourseId]})
 	}
+	if c.Query("sort") == "popular" {
+		sort.SliceStable(out, func(i, j int) bool { return out[i].Learners > out[j].Learners })
+	}
 	c.JSON(http.StatusOK, gin.H{"data": out})
+}
+
+// GET /api/learn/quizzes: every test in the courses this learner joined, plus
+// their attempts (score, status, feedback), so the quizzes page can show what
+// is open, what is done, and where the results are.
+func (h *Handler) MyQuizzes(c *gin.Context) {
+	me := c.GetInt(auth.CtxUserID)
+
+	type quizRow struct {
+		CourseID      int      `json:"course_id"`
+		CourseTitle   string   `json:"course_title"`
+		UnitID        int      `json:"unit_id"`
+		UnitTitle     string   `json:"unit_title"`
+		Questions     int      `json:"questions"`
+		PassMark      int      `json:"pass_mark"`
+		AttemptsUsed  int      `json:"attempts_used"`
+		MaxAttempts   int      `json:"max_attempts"`
+		BestScore     *float64 `json:"best_score"`
+		Passed        bool     `json:"passed"`
+		LastAttemptID *int     `json:"last_attempt_id"`
+		CanStart      bool     `json:"can_start"`
+		Reason        string   `json:"reason,omitempty"`
+		Locked        bool     `json:"locked"`
+	}
+	type attemptRow struct {
+		ID            int        `json:"id"`
+		CourseID      int        `json:"course_id"`
+		CourseTitle   string     `json:"course_title"`
+		UnitID        int        `json:"unit_id"`
+		UnitTitle     string     `json:"unit_title"`
+		Number        int        `json:"number"`
+		Status        string     `json:"status"`
+		ScorePercent  float64    `json:"score_percent"`
+		Passed        bool       `json:"passed"`
+		StartedAt     time.Time  `json:"started_at"`
+		SubmittedAt   *time.Time `json:"submitted_at"`
+		AutoSubmitted bool       `json:"auto_submitted"`
+		FeedbackCount int        `json:"feedback_count"`
+	}
+
+	var enrollments []coursemodels.Enrollment
+	h.s.db.Preload("Course").Where("user_id = ?", me).Order("enrolled_at DESC").Find(&enrollments)
+
+	quizzes := []quizRow{}
+	for _, e := range enrollments {
+		course := e.Course
+		if course.CourseId == nil || course.CourseStatus != "published" || course.UserId == me {
+			continue
+		}
+		units := h.s.units(e.CourseID)
+		open := unlocked(units, h.s.completedUnits(me, e.CourseID))
+		unitIDs := make([]int, 0, len(units))
+		for _, u := range units {
+			unitIDs = append(unitIDs, u.ID)
+		}
+		active := h.s.activeTests(unitIDs)
+		for _, u := range units {
+			if !active[u.ID] {
+				continue
+			}
+			st := h.s.testSettings(u.ID, e.CourseID)
+			atts := h.s.attempts(me, u.ID)
+			row := quizRow{CourseID: e.CourseID, CourseTitle: course.CourseTitle, UnitID: u.ID, UnitTitle: u.Title,
+				Questions: h.s.questionCount(u.ID), PassMark: st.PassMark, AttemptsUsed: len(atts), MaxAttempts: st.MaxAttempts}
+			for i := range atts {
+				a := atts[i]
+				if i == 0 {
+					id := a.ID
+					row.LastAttemptID = &id
+				}
+				if a.Status == AttemptDone {
+					if row.BestScore == nil || a.ScorePercent > *row.BestScore {
+						score := a.ScorePercent
+						row.BestScore = &score
+					}
+					if a.Passed {
+						row.Passed = true
+					}
+				}
+			}
+			row.CanStart, row.Reason = h.s.canStart(me, st, atts)
+			if !open[u.ID] {
+				row.Locked, row.CanStart, row.Reason = true, false, "Finish the earlier units first."
+			}
+			quizzes = append(quizzes, row)
+		}
+	}
+
+	var raw []Attempt
+	h.s.db.Where("user_id = ?", me).Order("COALESCE(submitted_at, started_at) DESC, id DESC").Limit(100).Find(&raw)
+	unitIDs, courseIDs := []int{0}, []int{0}
+	for _, a := range raw {
+		unitIDs, courseIDs = append(unitIDs, a.UnitID), append(courseIDs, a.CourseID)
+	}
+	var units []Unit
+	h.s.db.Where("id IN ?", unitIDs).Find(&units)
+	unitTitles := map[int]string{}
+	for _, u := range units {
+		unitTitles[u.ID] = u.Title
+	}
+	var courses []coursemodels.Course
+	h.s.db.Where("course_id IN ?", courseIDs).Find(&courses)
+	courseTitles := map[int]string{}
+	for _, co := range courses {
+		if co.CourseId != nil {
+			courseTitles[*co.CourseId] = co.CourseTitle
+		}
+	}
+
+	attempts := make([]attemptRow, 0, len(raw))
+	done, sum := 0, 0.0
+	passedUnits := map[int]bool{}
+	for _, a := range raw {
+		feedback := 0
+		for _, it := range a.Items {
+			if it.AIFeedback != "" || it.Note != "" {
+				feedback++
+			}
+		}
+		attempts = append(attempts, attemptRow{ID: a.ID, CourseID: a.CourseID, CourseTitle: courseTitles[a.CourseID],
+			UnitID: a.UnitID, UnitTitle: unitTitles[a.UnitID], Number: a.Number, Status: a.Status,
+			ScorePercent: a.ScorePercent, Passed: a.Passed, StartedAt: a.StartedAt, SubmittedAt: a.SubmittedAt,
+			AutoSubmitted: a.AutoSubmitted, FeedbackCount: feedback})
+		if a.Status == AttemptDone {
+			done++
+			sum += a.ScorePercent
+			if a.Passed {
+				passedUnits[a.UnitID] = true
+			}
+		}
+	}
+	average := 0.0
+	if done > 0 {
+		average = sum / float64(done)
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"quizzes": quizzes, "attempts": attempts,
+		"stats": gin.H{"available": len(quizzes), "attempts": done, "average_score": average, "passed": len(passedUnits)},
+	}})
 }
 
 // POST /api/learn/courses/:id/join
