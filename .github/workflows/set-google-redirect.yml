@@ -1,0 +1,36 @@
+name: Set Google redirect URI
+
+# One-off: update the API's Google redirect URI on the VPS without direct SSH.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  set-redirect:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Update /opt/focusflow/.env and recreate the API
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: root
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/focusflow
+            echo "before: $(grep '^GOOGLE_REDIRECT_URI=' .env || true)"
+            cp .env ".env.bak-$(date +%Y%m%d-%H%M%S)"
+            if grep -q '^GOOGLE_REDIRECT_URI=' .env; then
+              sed -i 's|^GOOGLE_REDIRECT_URI=.*|GOOGLE_REDIRECT_URI=https://www.focus-flow.studio/api/v1/auth/google/callback|' .env
+            else
+              echo 'GOOGLE_REDIRECT_URI=https://www.focus-flow.studio/api/v1/auth/google/callback' >> .env
+            fi
+            echo "after: $(grep '^GOOGLE_REDIRECT_URI=' .env)"
+            TAG=$(docker inspect focusflow_api --format '{{.Config.Image}}' | sed 's/.*://')
+            echo "image tag: ${TAG:-latest}"
+            API_TAG="${TAG:-latest}" docker compose up -d --force-recreate api
+            for i in $(seq 1 30); do
+              if curl -fsS http://127.0.0.1:8091/health; then echo; break; fi
+              if [ "$i" = "30" ]; then docker logs --tail 60 focusflow_api; exit 1; fi
+              sleep 2
+            done
